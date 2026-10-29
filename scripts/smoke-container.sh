@@ -127,8 +127,8 @@ check_kb_socket() {
 
 # kb_bm25 <user> <credential> index|search [kb id]: keyword search on the KB, run in the container.
 # The credential is "token:<local access token>" (the KB on 127.0.0.1:8020) or "principal:<value>"
-# (X-KB-Principal over the service socket, as the agent sends it). The image sets no default
-# embedding model, so a new KB is keyword-only: its search is ParadeDB pg_search's BM25 alone.
+# (X-KB-Principal over the service socket, as the agent sends it). The KB is made keyword-only
+# (vector_enabled off), so its search is ParadeDB pg_search's BM25 alone.
 # index: create the KB, add a document, wait until it is indexed, print the KB id.
 kb_bm25() {
     $DOCKER exec -i -u "$1" "$NAME" /opt/kb/venv/bin/python - "${@:2}" <<'EOF'
@@ -159,9 +159,14 @@ def search(kb, query):
                                               "disable_vector_match": True, "match_count": 5})
 
 if cmd == "index":
-    kb = call("POST", "/knowledge-bases", {"name": "BM25 smoke test"})
-    if kb.get("embedding_model_id"):
-        sys.exit(f"the KB has embedding model {kb['embedding_model_id']}: not a keyword-only test")
+    # kb.cfg's default models (the CERN gateway) are out of CI's reach: with vector_enabled off
+    # nothing is embedded, and without the wiki (a subtask: the document would stay `finalizing`)
+    # and memory no chat model is called.
+    kb = call("POST", "/knowledge-bases", {"name": "BM25 smoke test",
+                                           "indexing_strategy": {"vector_enabled": False, "wiki_enabled": False},
+                                           "memory_config": {"enabled": False}})
+    if kb["indexing_strategy"].get("vector_enabled", True):
+        sys.exit(f"the KB has vector search on ({kb['indexing_strategy']}): not a keyword-only test")
     item = call("POST", f"/knowledge-bases/{kb['id']}/knowledge/manual", {
         "title": "Cryostat runbook", "status": "publish",
         "content": "# Cryostat runbook\n\nWhen the zymurgic sensor alarms, the shifter refills the cryostat "
