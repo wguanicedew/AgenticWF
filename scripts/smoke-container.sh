@@ -322,24 +322,28 @@ check_local_programs() {   # check_local_programs <services>
 }
 
 check_local_kb() {
-    local token code
+    local token code links
     token=$($DOCKER exec "$NAME" agenticwf-kb token)
     curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$L_KB/kb/api/v1/me" | grep -q '"subject":"local:ci-user"' \
         || fail "KB /kb/api/v1/me with its token"
     code=$(status "http://127.0.0.1:$L_KB/kb/api/v1/me")
     [[ $code == 401 ]] || fail "KB /kb/api/v1/me without the token gave $code"
-    $DOCKER exec "$NAME" agenticwf-links | grep -q "^KB:    http://localhost:$L_KB/kb/?token=$token\$" || fail "agenticwf-links (KB)"
+    # Read it whole first: `| grep -q` stops reading at the match, and agenticwf-links, still
+    # writing, dies of SIGPIPE, which pipefail turns into a failure.
+    links=$($DOCKER exec "$NAME" agenticwf-links)
+    grep -q "^KB:    http://localhost:$L_KB/kb/?token=$token\$" <<<"$links" || fail "agenticwf-links (KB)"
     echo "   ok: KB with its access token (local:ci-user)"
 }
 
 check_local_agent() {
-    local token code
+    local token code links
     token=$($DOCKER exec "$NAME" cat /var/lib/agenticwf/agent/local/token)
     curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$L_AGENT/api/v1/me" | grep -q '"subject":"local:ci-user"' \
         || fail "agent /api/v1/me with its token"
     code=$(status "http://127.0.0.1:$L_AGENT/api/v1/me")
     [[ $code == 401 ]] || fail "agent /api/v1/me without the token gave $code"
-    $DOCKER exec "$NAME" agenticwf-links | grep -q "^Agent: http://localhost:$L_AGENT/?token=$token\$" || fail "agenticwf-links (agent)"
+    links=$($DOCKER exec "$NAME" agenticwf-links)
+    grep -q "^Agent: http://localhost:$L_AGENT/?token=$token\$" <<<"$links" || fail "agenticwf-links (agent)"
     echo "   ok: agent with its access token (local:ci-user)"
 }
 
@@ -347,7 +351,7 @@ check_local_knowledge() {   # check_local_knowledge <services>
     local principal
     if [[ " $1 " == *" kb "* ]]; then
         # What the agent does: the user's context over the KB's service socket, as the OS user `agent`.
-        principal=$(printf '{"subject":"local:ci-user","scopes":["knowledge:read","knowledge:write"]}' \
+        principal=$(printf '{"subject":"local:ci-user","user_id":"local:ci-user","scopes":["knowledge:read","knowledge:write"]}' \
             | base64 | tr '+/' '-_' | tr -d '=\n')
         for _ in $(seq 1 30); do $DOCKER exec "$NAME" test -S /run/agenticwf-kb/kb.sock && break; sleep 2; done
         $DOCKER exec -u agent "$NAME" curl -fsS --unix-socket /run/agenticwf-kb/kb.sock \
