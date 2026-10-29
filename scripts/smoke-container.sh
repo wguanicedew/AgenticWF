@@ -265,12 +265,23 @@ check_m2m_token() {
     echo "   ok: Logto token -> authsvc /verify -> agent (machine app $id)"
 }
 
+programs() {   # supervisorctl status, group prefixes dropped (auth:logto -> logto, groups.ini)
+    local out
+    # The healthcheck passes as soon as the services answer, which can be before supervisord's
+    # startsecs (5 s) have passed: wait until no program is STARTING any more.
+    for _ in $(seq 1 30); do
+        out=$($DOCKER exec "$NAME" supervisorctl -c /etc/supervisord.conf status 2>&1 || true)
+        grep -q ' STARTING' <<<"$out" || break
+        sleep 1
+    done
+    sed -E 's/^[a-z]+://' <<<"$out"
+}
+
 check_no_fatal() {
     local out
     # Worker programs are STOPPED unless *_WORKER_PROCESSES > 0, logto-bootstrap EXITED (it runs
     # once); nothing may be failing.
-    out=$($DOCKER exec "$NAME" supervisorctl -c /etc/supervisord.conf status 2>&1 || true)
-    out=$(sed -E 's/^[a-z]+://' <<<"$out")   # auth:logto -> logto (groups.ini)
+    out=$(programs)
     if grep -E 'FATAL|BACKOFF|EXITED' <<<"$out" | grep -v '^logto-bootstrap '; then
         fail "supervisord programs not running"
     fi
@@ -294,8 +305,7 @@ start_local() {   # start_local <services>
 
 check_local_programs() {   # check_local_programs <services>
     local out p
-    out=$($DOCKER exec "$NAME" supervisorctl -c /etc/supervisord.conf status 2>&1 || true)
-    out=$(sed -E 's/^[a-z]+://' <<<"$out")   # auth:logto -> logto (groups.ini)
+    out=$(programs)
     grep -E 'FATAL|BACKOFF|EXITED' <<<"$out" && fail "supervisord programs failing"
     for p in logto logto-bootstrap authsvc; do
         grep -Eq "^$p +RUNNING" <<<"$out" && fail "$p runs in local mode"
