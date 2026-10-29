@@ -206,8 +206,8 @@ else
             "# Or by the container's name or id (docker ps):" \
             "docker exec $container agenticwf-links $1"
     }
-    if has agent; then export AGENT_LOCAL_TOKEN_HELP="$(token_help agent)"; fi
-    if has kb; then export KB_TOKEN_HELP="$(token_help kb)"; fi
+    if has agent; then AGENT_LOCAL_TOKEN_HELP=$(token_help agent) && export AGENT_LOCAL_TOKEN_HELP; fi
+    if has kb; then KB_TOKEN_HELP=$(token_help kb) && export KB_TOKEN_HELP; fi
     # AGENTICWF_LOCAL_HINT: a phrase of yours; the sign-in pages show the token to whoever gives it
     # (wrong answers are throttled). Passed to the services only.
     hint=${AGENTICWF_LOCAL_HINT:-}

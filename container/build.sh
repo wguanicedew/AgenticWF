@@ -57,7 +57,7 @@ NETWORK=${NETWORK:-host}
 [[ "$NETWORK" == default ]] || build+=(--network "$NETWORK")
 # BuildKit authenticates git URL build contexts on github.com with this secret.
 [[ -n "${AGENTICWF_TOKEN:-}" && "$DOCKER" != podman ]] &&
-    build+=(--secret id=GIT_AUTH_TOKEN.github.com,env=AGENTICWF_TOKEN)
+    build+=(--secret "id=GIT_AUTH_TOKEN.github.com,env=AGENTICWF_TOKEN")
 
 exec "${build[@]}" \
     -f "$root/container/Dockerfile" \
