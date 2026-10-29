@@ -1,0 +1,47 @@
+# OPTIONAL: the Jaeger UI (compose.jaeger.yaml) behind Logto sign-in, under the application's prefix:
+#
+#   layout A: https://{$AGENTICWF_HOST}/app/jaeger/
+#   layout B: https://{$AGENTICWF_APP_HOST}/jaeger/
+#
+# Install ONE Jaeger UI file (README.md, Tracing): this one, agenticwf-jaeger-ui-network.caddy, or
+# agenticwf-jaeger-ui.caddy (no login, at /jaeger/ on the site root, in /etc/caddy/jaeger-ui.d/).
+# Enable:  sudo mkdir -p /etc/caddy/jaeger-ui-app.d
+#          sudo cp deploy/caddy/jaeger-ui/agenticwf-jaeger-ui-logto.caddy /etc/caddy/jaeger-ui-app.d/
+#          layout A: run Jaeger with JAEGER_BASE_PATH=/app/jaeger (compose.jaeger.yaml)
+# Disable: sudo rm /etc/caddy/jaeger-ui-app.d/agenticwf-jaeger-ui-*.caddy
+# Then:    sudo systemctl reload caddy
+#
+# Every request goes through authsvc like the application's: a browser without a session is sent
+# to Logto and comes back here; then the `/jaeger/**` rule in deploy/policy.jaeger.yaml (in the
+# image) asks for the `admin` permission. Jaeger itself gets neither the session cookie nor the
+# bearer token.
+#
+# The site files import /etc/caddy/jaeger-ui-app.d/*.caddy inside the application's routes, where
+# layout A's /app is already stripped (the path authsvc checks). Jaeger serves under the full
+# browser path (JAEGER_BASE_PATH: /app/jaeger for A, /jaeger for B), so the original URI is restored
+# before proxying.
+
+# Relative, so that it resolves under /app in layout A.
+redir /jaeger jaeger/ 308
+
+@agenticwf_jaeger_ui path /jaeger/*
+handle @agenticwf_jaeger_ui {
+	route {
+		# Never trust identity headers supplied by the client.
+		request_header -X-Auth-*
+
+		# Uncomment to also require operator networks (AGENTICWF_ADMIN_ALLOWED_CIDRS):
+		# @outside not remote_ip {$AGENTICWF_ADMIN_ALLOWED_CIDRS}
+		# respond @outside "Forbidden" 403
+
+		# Sign-in (302 to Logto for page loads, 401 for the UI's API calls) and the `admin` check.
+		forward_auth 127.0.0.1:8010 {
+			uri /verify
+		}
+
+		request_header -Cookie
+		request_header -Authorization
+		rewrite * {http.request.orig_uri}
+		reverse_proxy 127.0.0.1:16686
+	}
+}

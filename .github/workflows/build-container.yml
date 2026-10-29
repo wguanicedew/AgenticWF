@@ -1,0 +1,341 @@
+name: Build container and clients
+
+# The all-in-one image (auth + KB + agent) from the three service repos. Checks and a smoke-tested
+# build on every push and pull request; published to ghcr.io when a tag is pushed.
+# The client packages (agenticwf-auth-client, agenticwf-kb-client, agenticwf-agent-client) are
+# built and install-tested on every run too; published to PyPI when a tag is pushed (the tag is
+# their version, e.g. v0.2.0 -> 0.2.0), and to TestPyPI on request (a manual run, publish_clients).
+on:
+  push:
+    branches: ["main"]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      auth_ref:
+        description: AgenticWF-auth ref (tag, branch or SHA)
+        required: false
+      kb_ref:
+        description: AgenticWF-KB ref
+        required: false
+      agent_ref:
+        description: AgenticWF-agent ref
+        required: false
+      publish_clients:
+        description: "Publish the client packages to TestPyPI (as <version>.dev<run number>; tags go to PyPI)"
+        type: boolean
+        default: false
+
+# Read-only by default; only the container job may publish packages, and publish-clients PyPI ones.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/agenticwf
+  # The service repos and refs come from sources.env (the "Service sources" step), as for
+  # scripts/fetch-sources.sh. A manual run's inputs or the repository variables AUTH_REF, KB_REF,
+  # AGENT_REF (Settings -> Variables) override the refs.
+  CADDY_IMAGE: caddy:2.10.2
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Service sources (sources.env, unless overridden)
+        env:
+          OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
+          OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
+        run: |
+          . ./sources.env
+          for n in AUTH KB AGENT; do
+              repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
+              repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
+              ref=${!override_var:-${!ref_var}}
+              echo "${n}_REPO=$repo" >> "$GITHUB_ENV"
+              echo "${n}_REF=$ref" >> "$GITHUB_ENV"
+              echo "$n: $repo @ $ref"
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUTH_REPO }}
+          ref: ${{ env.AUTH_REF }}
+          path: .src/auth
+          # If the service repos are private, add a read token as the secret AGENTICWF_TOKEN.
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KB_REPO }}
+          ref: ${{ env.KB_REF }}
+          path: .src/kb
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AGENT_REPO }}
+          ref: ${{ env.AGENT_REF }}
+          path: .src/agent
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shell scripts
+        run: |
+          for f in container/scripts/*.sh container/build.sh scripts/*.sh; do bash -n "$f"; done
+          shellcheck -S warning container/scripts/*.sh container/build.sh scripts/*.sh
+
+      - name: Merged route policy (as the image build does it)
+        run: |
+          pip install ./.src/auth/authsvc
+          python container/scripts/merge-policy.py \
+              .src/kb/deploy/policy.kb.yaml .src/agent/deploy/policy.agent.yaml \
+              .src/auth/container/config/policy.yaml > policy.yaml
+          python -c 'from pathlib import Path; from agenticwf.auth.authz import Policy; Policy.load(Path("policy.yaml"))'
+          grep -c 'path:' policy.yaml
+
+      - name: Caddy site files
+        run: |
+          check() {   # check <name> <site files...>
+              local name=$1; shift
+              mkdir -p "caddy-$name/Caddyfile.d"
+              cp deploy/caddy/Caddyfile "caddy-$name/"
+              for f in "$@"; do cp "deploy/caddy/sites/$f" "caddy-$name/Caddyfile.d/"; done
+              docker run --rm -v "$PWD/caddy-$name:/etc/caddy:ro" \
+                  -e AGENTICWF_HOST=host.example.org -e AGENTICWF_ACME_EMAIL=ops@example.org \
+                  -e AGENTICWF_LOGTO_HOST=auth.example.org -e AGENTICWF_LOGTO_ADMIN_HOST=auth-admin.example.org \
+                  -e AGENTICWF_APP_HOST=app.example.org -e AGENTICWF_ADMIN_ALLOWED_CIDRS=10.0.0.0/8 \
+                  "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+              echo "ok: $name"
+          }
+          check single agenticwf-single-host.caddyfile
+          check single-admin agenticwf-single-host.caddyfile agenticwf-admin-console.caddyfile
+          check multi agenticwf-multi-host.caddyfile
+
+  container:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Service sources (sources.env, unless overridden)
+        env:
+          OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
+          OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
+        run: |
+          . ./sources.env
+          for n in AUTH KB AGENT; do
+              repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
+              repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
+              ref=${!override_var:-${!ref_var}}
+              echo "${n}_REPO=$repo" >> "$GITHUB_ENV"
+              echo "${n}_REF=$ref" >> "$GITHUB_ENV"
+              echo "$n: $repo @ $ref"
+          done
+      - name: Check the service refs
+        if: github.ref_type == 'tag'
+        run: |
+          for v in AUTH_REF KB_REF AGENT_REF; do
+              [[ "${!v}" == main ]] && echo "::warning::$v is main; pin a release tag or commit in sources.env"
+          done
+          true
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUTH_REPO }}
+          ref: ${{ env.AUTH_REF }}
+          path: .src/auth
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KB_REPO }}
+          ref: ${{ env.KB_REF }}
+          path: .src/kb
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AGENT_REPO }}
+          ref: ${{ env.AGENT_REF }}
+          path: .src/agent
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+
+      - name: Source commits
+        id: src
+        run: |
+          for s in auth kb agent; do
+              echo "$s=$(git -C .src/$s rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/Dockerfile
+          build-contexts: |
+            auth=.src/auth
+            kb=.src/kb
+            agent=.src/agent
+          platforms: linux/amd64
+          load: true
+          tags: agenticwf:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (server)
+        run: scripts/smoke-container.sh agenticwf:ci server
+
+      # The same image in the personal mode (AGENTICWF_MODE=local).
+      - name: "Smoke test (local: kb, agent, agent + kb)"
+        run: scripts/smoke-container.sh agenticwf:ci local
+
+      - if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: github.ref_type == 'tag'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.agenticwf.auth-ref=${{ env.AUTH_REF }}
+            org.agenticwf.auth-commit=${{ steps.src.outputs.auth }}
+            org.agenticwf.kb-ref=${{ env.KB_REF }}
+            org.agenticwf.kb-commit=${{ steps.src.outputs.kb }}
+            org.agenticwf.agent-ref=${{ env.AGENT_REF }}
+            org.agenticwf.agent-commit=${{ steps.src.outputs.agent }}
+
+      # arm64 (Apple silicon laptops) builds under QEMU, without Logto: local mode only.
+      - if: github.ref_type == 'tag'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # Same inputs as the tested build, so the amd64 layers come from the cache.
+      - if: github.ref_type == 'tag'
+        name: Publish (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/Dockerfile
+          build-contexts: |
+            auth=.src/auth
+            kb=.src/kb
+            agent=.src/agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  clients:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Service sources (sources.env, unless overridden)
+        env:
+          OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
+          OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
+        run: |
+          . ./sources.env
+          for n in AUTH KB AGENT; do
+              repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
+              repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
+              ref=${!override_var:-${!ref_var}}
+              echo "${n}_REPO=$repo" >> "$GITHUB_ENV"
+              echo "${n}_REF=$ref" >> "$GITHUB_ENV"
+              echo "$n: $repo @ $ref"
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUTH_REPO }}
+          ref: ${{ env.AUTH_REF }}
+          path: .src/auth
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KB_REPO }}
+          ref: ${{ env.KB_REF }}
+          path: .src/kb
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AGENT_REPO }}
+          ref: ${{ env.AGENT_REF }}
+          path: .src/agent
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A tag is the release version of all three (v0.2.0 -> 0.2.0); any other run builds
+      # <the auth client's pyproject version>.dev<run number>, unique for TestPyPI.
+      - name: Version
+        id: version
+        run: |
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+              version=${GITHUB_REF_NAME#v}
+          else
+              base=$(python -c 'import tomllib; print(tomllib.load(open(".src/auth/cli/pyproject.toml", "rb"))["project"]["version"])')
+              version=$base.dev$GITHUB_RUN_NUMBER
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "client packages: $version"
+
+      - name: Build and install-test
+        run: |
+          pip install build twine
+          scripts/build-clients.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-clients
+          path: dist/
+          if-no-files-found: error
+
+  # With an API token, as iDDS does (twine, user __token__): the repository (or organization)
+  # secret PYPI_TOKEN for pypi.org, TEST_PYPI_TOKEN for test.pypi.org. The first upload of a new
+  # project needs a token scoped to the whole account; later ones can use project-scoped tokens.
+  publish-clients:
+    needs: [clients, container]   # only what passed with a smoke-tested image
+    if: github.ref_type == 'tag' || inputs.publish_clients
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-clients
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish ${{ needs.clients.outputs.version }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ github.ref_type == 'tag' && secrets.PYPI_TOKEN || secrets.TEST_PYPI_TOKEN }}
+          TWINE_REPOSITORY_URL: ${{ github.ref_type == 'tag' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
+        run: |
+          [[ -n $TWINE_PASSWORD ]] || { echo "::error::no PyPI token: set the secret PYPI_TOKEN (tags) or TEST_PYPI_TOKEN"; exit 1; }
+          pip install twine
+          # --skip-existing: a re-run of the same tag
+          twine upload --skip-existing --non-interactive dist/agenticwf_*_client-*.whl dist/agenticwf_*_client-*.tar.gz

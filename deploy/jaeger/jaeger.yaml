@@ -1,0 +1,69 @@
+# Jaeger v2 for AgenticWF (compose.jaeger.yaml mounts it as /etc/jaeger/jaeger.yaml).
+# Based on Jaeger's cmd/jaeger/config-badger.yaml (v2.21.0): one all-in-one process that receives
+# OTLP, keeps the spans in Badger on the jaeger-data volume, and serves the UI.
+#
+#   4317  OTLP/gRPC   Caddy (deploy/caddy/tracing/; EL9's Caddy 2.6 exports gRPC only)
+#   4318  OTLP/HTTP   authsvc, the KB and the agent in the agenticwf container
+#   16686 UI and query API (the dashboard), under /jaeger/ (JAEGER_BASE_PATH)
+#
+# compose.jaeger.yaml runs Jaeger with host networking, so every listener binds JAEGER_LISTEN_HOST
+# (default 127.0.0.1) on the host itself; also 13133 (health) and 16685 (query gRPC). With Docker's
+# bridge and published ports instead, set JAEGER_LISTEN_HOST=0.0.0.0. Traces are kept for
+# JAEGER_TRACES_TTL (default 7 days).
+
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+  telemetry:
+    resource:
+      service.name: jaeger
+    logs:
+      level: info
+
+extensions:
+  healthcheckv2:
+    use_v2: true
+    http:
+      endpoint: ${env:JAEGER_LISTEN_HOST:-127.0.0.1}:13133
+
+  jaeger_query:
+    storage:
+      traces: badger_store
+    # The browser path Caddy serves the UI under (deploy/caddy/jaeger-ui/); the SSH tunnel uses it
+    # too. /jaeger, except with agenticwf-jaeger-ui-{logto,network}.caddy in layout A: /app/jaeger.
+    base_path: ${env:JAEGER_BASE_PATH:-/jaeger}
+    http:
+      endpoint: ${env:JAEGER_LISTEN_HOST:-127.0.0.1}:16686
+    grpc:
+      endpoint: ${env:JAEGER_LISTEN_HOST:-127.0.0.1}:16685
+
+  jaeger_storage:
+    backends:
+      badger_store:
+        badger:
+          # /tmp is the image's volume, writable by its user (10001); jaeger-data is mounted there.
+          directories:
+            keys: /tmp/jaeger/keys
+            values: /tmp/jaeger/values
+          ephemeral: false
+          ttl:
+            spans: ${env:JAEGER_TRACES_TTL:-168h}
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:JAEGER_LISTEN_HOST:-127.0.0.1}:4317
+      http:
+        endpoint: ${env:JAEGER_LISTEN_HOST:-127.0.0.1}:4318
+
+processors:
+  batch:
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: badger_store

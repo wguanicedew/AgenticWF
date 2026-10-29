@@ -1,0 +1,51 @@
+# Personal AgenticWF on a laptop/desktop: the agent and/or the KB, without Logto, authsvc or Caddy.
+# The same image as the server (agenticwf:latest), run with AGENTICWF_MODE=local; built for this
+# machine's architecture (arm64 on Apple silicon, which has no Logto and runs local mode only).
+#
+#   scripts/fetch-sources.sh            # the service repos pinned in sources.env, into .src/
+#   docker compose -f compose.local.yaml up -d --build
+#   docker compose -f compose.local.yaml exec agenticwf agenticwf-links   # the sign-in links
+#
+# Only the agent or only the KB, and who you are in both (default: your login on this machine):
+#   AGENTICWF_SERVICES=kb docker compose -f compose.local.yaml up -d
+#   AGENTICWF_LOCAL_USER=wguan docker compose -f compose.local.yaml up -d
+# Settings (model API keys, ...): ~/.agenticwf/local.env, see container/agenticwf-local.env.example.
+# AGENTICWF_SERVICES and AGENTICWF_LOCAL_USER may be set there too; the shell's win.
+# AGENTICWF_LOCAL_HINT (there only): the sign-in pages show the token to whoever gives this phrase.
+name: agenticwf-local
+services:
+  agenticwf:
+    image: agenticwf:latest
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+      # RUN steps (dnf, pip, downloads) use the host network: some hosts block bridged outbound traffic.
+      network: host
+      additional_contexts:
+        auth: ${AUTH_SRC:-.src/auth}
+        kb: ${KB_SRC:-.src/kb}
+        agent: ${AGENT_SRC:-.src/agent}
+    environment:
+      AGENTICWF_MODE: local
+      # The shell's values under their own names: `environment` overrides env_file, so passing
+      # AGENTICWF_SERVICES or AGENTICWF_LOCAL_USER here would hide local.env's. The entrypoint takes
+      # the shell's, then local.env's, then the defaults ("agent kb"; AGENTICWF_HOST_USER).
+      AGENTICWF_COMPOSE_SERVICES: ${AGENTICWF_SERVICES:-}
+      # One user for both: what you add in the KB is yours when the agent searches it.
+      AGENTICWF_COMPOSE_LOCAL_USER: ${AGENTICWF_LOCAL_USER:-}
+      AGENTICWF_HOST_USER: ${USER:-}
+      AGENT_PUBLIC_URL: http://localhost:${AGENT_HOST_PORT:-8765}
+      KB_PUBLIC_URL: http://localhost:${KB_HOST_PORT:-8766}
+    env_file:
+      - path: ${HOME}/.agenticwf/local.env
+        required: false
+    ports:
+      # Only this machine reaches them.
+      - "127.0.0.1:${AGENT_HOST_PORT:-8765}:8000"   # agent
+      - "127.0.0.1:${KB_HOST_PORT:-8766}:8020"      # KB
+    volumes:
+      - agenticwf-local-data:/var/lib/agenticwf
+    restart: unless-stopped
+
+volumes:
+  agenticwf-local-data:

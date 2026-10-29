@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Print how to open the services of this container:
+#   docker exec agenticwf agenticwf-links             every service's sign-in link
+#   docker exec agenticwf agenticwf-links agent|kb    one service's link, and its token on its own
+# Local mode: the agent's and the KB's sign-in links, with their access tokens (keep them private).
+# The sign-in pages show these commands (AGENT_LOCAL_TOKEN_HELP, KB_TOKEN_HELP from the entrypoint).
+# Server mode: the CLI settings that logto-bootstrap wrote.
+set -euo pipefail
+# shellcheck source=/dev/null
+[[ -r /run/agenticwf/health.env ]] && . /run/agenticwf/health.env
+[[ $(id -u) == 0 ]] || { echo "run as root: docker exec <container> agenticwf-links" >&2; exit 1; }
+services=" ${AGENTICWF_SERVICES:-} "
+only=""
+for arg in "$@"; do
+    case "$arg" in
+        agent|kb) only=$arg ;;
+        -h|--help) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "agenticwf-links: '$arg' is not agent or kb" >&2; exit 2 ;;
+    esac
+done
+
+if [[ ${AGENTICWF_MODE:-} == server ]]; then
+    echo "Server mode: people sign in through Logto at APP_ORIGIN (README.md, Caddy on the host)."
+    if [[ -r /var/lib/agenticwf/logto/clients.env ]]; then
+        echo "agenticwf CLI settings:"
+        grep -v '^#' /var/lib/agenticwf/logto/clients.env
+    fi
+    exit 0
+fi
+if [[ -n $only && $services != *" $only "* ]]; then
+    echo "The $only does not run in this container (AGENTICWF_SERVICES=${AGENTICWF_SERVICES:-})." >&2
+    exit 1
+fi
+
+wait_for() { for _ in $(seq 1 30); do [[ -s "$1" ]] && return 0; sleep 1; done; return 1; }
+# show LABEL TOKEN_FILE URL_WITHOUT_TOKEN
+show() {
+    if wait_for "$2"; then
+        echo "$1 $3?token=$(cat "$2")"
+        [[ -n $only ]] && echo "Token: $(cat "$2")"
+    else
+        echo "$1 not started yet (no token in $2); see docker logs"
+    fi
+    return 0
+}
+if [[ $services == *" agent "* && ( -z $only || $only == agent ) ]]; then
+    show "Agent:" "${AGENTICWF_AGENT_HOME:-/var/lib/agenticwf/agent/local}/token" "${AGENT_PUBLIC_URL:-http://localhost:8765}/"
+fi
+if [[ $services == *" kb "* && ( -z $only || $only == kb ) ]]; then
+    show "KB:   " "${KB_TOKEN_FILE:-/var/lib/agenticwf/kb/secrets/token}" "${KB_PUBLIC_URL:-http://localhost:8766}${KB_BASE_PATH:-/kb}/"
+fi
+echo "Each link signs you in once and keeps a cookie; the token also works as 'Authorization: Bearer <token>'."

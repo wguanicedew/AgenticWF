@@ -1,0 +1,34 @@
+# OPTIONAL: the Jaeger UI (compose.jaeger.yaml) under /jaeger/ on the application's hostname, port
+# 443, restricted to operator networks. The site files import /etc/caddy/jaeger-ui.d/*.caddy into
+# that site block:
+#
+#   layout A: https://{$AGENTICWF_HOST}/jaeger/
+#   layout B: https://{$AGENTICWF_APP_HOST}/jaeger/
+#
+# Enable:  sudo mkdir -p /etc/caddy/jaeger-ui.d
+#          sudo cp deploy/caddy/jaeger-ui/agenticwf-jaeger-ui.caddy /etc/caddy/jaeger-ui.d/
+# Disable: sudo rm /etc/caddy/jaeger-ui.d/agenticwf-jaeger-ui.caddy
+# Then:    sudo systemctl reload caddy
+#
+# Install ONE Jaeger UI file. The others, in /etc/caddy/jaeger-ui-app.d/, serve it inside the
+# application (layout A: /app/jaeger/), with Logto sign-in (agenticwf-jaeger-ui-logto.caddy) or
+# without (agenticwf-jaeger-ui-network.caddy); README.md, Tracing.
+#
+# Jaeger serves its UI and API under the same prefix (base_path in deploy/jaeger/jaeger.yaml), so
+# the path is passed on unchanged; change both together.
+#
+# Traces carry request paths, user ids and timings, and Jaeger has no login of its own: access is
+# by network, as for the Logto admin console. Caddy environment (no default on purpose):
+#   AGENTICWF_ADMIN_ALLOWED_CIDRS="188.184.0.0/15 2001:1458::/32"   # your networks
+# If it is unset, everyone gets 403. These requests do not go through authsvc and are not traced.
+
+redir /jaeger /jaeger/ 308
+
+@agenticwf_jaeger_ui path /jaeger/*
+handle @agenticwf_jaeger_ui {
+	@outside not remote_ip {$AGENTICWF_ADMIN_ALLOWED_CIDRS}
+	respond @outside "Forbidden" 403
+
+	request_header -X-Auth-*
+	reverse_proxy 127.0.0.1:16686
+}

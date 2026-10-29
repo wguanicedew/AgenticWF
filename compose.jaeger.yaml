@@ -1,0 +1,33 @@
+# Jaeger, in its own container, for traces from host Caddy and the agenticwf container
+# (README.md, Tracing). A separate compose project: start, stop or remove it without touching
+# AgenticWF.
+#
+#   docker compose -f compose.jaeger.yaml up -d
+#
+# Host networking, like the agenticwf container: no Docker bridge, so no iptables rules (hosts with
+# Puppet-managed nftables break Docker's bridge chains). Jaeger listens on the host's 127.0.0.1 only
+# (JAEGER_LISTEN_HOST in deploy/jaeger/jaeger.yaml), where Caddy and the container reach it:
+#   4317  OTLP/gRPC   Caddy:      OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 (agenticwf-caddy.env.example)
+#   4318  OTLP/HTTP   container:  OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 (agenticwf.env.example)
+#   16686 dashboard   under JAEGER_BASE_PATH (/jaeger): https://<app host>/jaeger/ through Caddy
+#                     (deploy/caddy/jaeger-ui/; README.md, Tracing, for the options),
+#                     or ssh -L 16686:127.0.0.1:16686 host, then http://localhost:16686/jaeger/
+# They must be free on the host, and 13133 (health) and 16685 (query gRPC) too. Traces are kept for JAEGER_TRACES_TTL (default 168h) in the
+# jaeger-data volume.
+name: agenticwf-jaeger
+services:
+  jaeger:
+    image: jaegertracing/jaeger:${JAEGER_VERSION:-2.21.0}
+    command: ["--config", "/etc/jaeger/jaeger.yaml"]
+    environment:
+      JAEGER_TRACES_TTL: ${JAEGER_TRACES_TTL:-168h}
+      JAEGER_BASE_PATH: ${JAEGER_BASE_PATH:-/jaeger}    # /app/jaeger: jaeger-ui-app.d/ in layout A
+      JAEGER_LISTEN_HOST: 127.0.0.1                     # host networking: never 0.0.0.0 here
+    network_mode: host
+    volumes:
+      - ./deploy/jaeger/jaeger.yaml:/etc/jaeger/jaeger.yaml:ro
+      - jaeger-data:/tmp
+    restart: unless-stopped
+
+volumes:
+  jaeger-data:

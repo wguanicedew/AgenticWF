@@ -1,0 +1,40 @@
+# OPTIONAL: the Jaeger UI (compose.jaeger.yaml) without sign-in, for operator networks only, under
+# the application's prefix:
+#
+#   layout A: https://{$AGENTICWF_HOST}/app/jaeger/
+#   layout B: https://{$AGENTICWF_APP_HOST}/jaeger/
+#
+# Install ONE Jaeger UI file (README.md, Tracing): this one, agenticwf-jaeger-ui-logto.caddy, or
+# agenticwf-jaeger-ui.caddy (no login, at /jaeger/ on the site root, in /etc/caddy/jaeger-ui.d/).
+# Enable:  sudo mkdir -p /etc/caddy/jaeger-ui-app.d
+#          sudo cp deploy/caddy/jaeger-ui/agenticwf-jaeger-ui-network.caddy /etc/caddy/jaeger-ui-app.d/
+#          layout A: run Jaeger with JAEGER_BASE_PATH=/app/jaeger (compose.jaeger.yaml)
+# Disable: sudo rm /etc/caddy/jaeger-ui-app.d/agenticwf-jaeger-ui-*.caddy
+# Then:    sudo systemctl reload caddy
+#
+# For when Logto or authsvc is not available, or the UI must work while they are down. Traces carry
+# request paths, user ids and timings, and Jaeger has no login of its own: access is by network,
+# as for the Logto admin console. Caddy environment (no default on purpose):
+#   AGENTICWF_ADMIN_ALLOWED_CIDRS="188.184.0.0/15 2001:1458::/32"   # your networks
+# If it is unset, everyone gets 403. These requests do not go through authsvc.
+#
+# The site files import /etc/caddy/jaeger-ui-app.d/*.caddy inside the application's routes, where
+# layout A's /app is already stripped. Jaeger serves under the full browser path (JAEGER_BASE_PATH:
+# /app/jaeger for A, /jaeger for B), so the original URI is restored before proxying.
+
+# Relative, so that it resolves under /app in layout A.
+redir /jaeger jaeger/ 308
+
+@agenticwf_jaeger_ui path /jaeger/*
+handle @agenticwf_jaeger_ui {
+	route {
+		@outside not remote_ip {$AGENTICWF_ADMIN_ALLOWED_CIDRS}
+		respond @outside "Forbidden" 403
+
+		request_header -X-Auth-*
+		request_header -Cookie
+		request_header -Authorization
+		rewrite * {http.request.orig_uri}
+		reverse_proxy 127.0.0.1:16686
+	}
+}

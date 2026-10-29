@@ -1,0 +1,12 @@
+# authsvc route policy for the Jaeger UI behind Logto (deploy/caddy/jaeger-ui/agenticwf-jaeger-ui-logto.caddy),
+# merged into /etc/agenticwf/policy.yaml at image build (container/Dockerfile).
+#
+# Caddy serves the UI at ${APP_BASE_PATH}/jaeger/ and strips APP_BASE_PATH before /verify, so the
+# path is /jaeger/... in both layouts. Without that Caddy file, nothing is routed here.
+required_scopes: [app:access]
+
+rules:
+  # Traces show every user's paths, ids and timings: administrators only, people only.
+  - path: /jaeger/**
+    scopes: [admin]
+    allow_machine: false

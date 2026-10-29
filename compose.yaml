@@ -1,0 +1,54 @@
+# All-in-one AgenticWF (auth + KB + agent) behind host Caddy. Needs Docker Compose >= 2.17
+# (additional_contexts).
+#
+#   sudo install -m 0600 container/agenticwf.env.example /etc/agenticwf/agenticwf.env   # edit it
+#   scripts/fetch-sources.sh            # the service repos pinned in sources.env, into .src/
+#   docker compose build
+#   # The image's settings, to edit on the host (models: agent.cfg [llm], kb.cfg [models]). Take
+#   # them from the image, not .src/: the build switches the agent's [knowledge] section on.
+#   for f in agent.cfg kb.cfg; do docker run --rm --entrypoint cat agenticwf:latest /etc/agenticwf/$f \
+#       | sudo tee /etc/agenticwf/$f > /dev/null; done
+#   docker compose up -d
+#
+# AUTH_SRC / KB_SRC / AGENT_SRC (environment or a local .env file) build other checkouts instead.
+#
+# Host networking: the services listen on 127.0.0.1 only (LISTEN_HOST), where host Caddy reaches
+# them, and Logto sends mail through the host's MTA on 127.0.0.1:25. Ports: 3001 Logto, 3002 Logto
+# admin, 8010 authsvc, 8000 agent, 8020 KB, and PostgreSQL on PGPORT (5432); they must be free on
+# the host.
+services:
+  agenticwf:
+    image: agenticwf:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+      # RUN steps (dnf, pip, downloads) use the host network: some hosts block bridged outbound traffic.
+      network: host
+      additional_contexts:
+        auth: ${AUTH_SRC:-.src/auth}
+        kb: ${KB_SRC:-.src/kb}
+        agent: ${AGENT_SRC:-.src/agent}
+    network_mode: host
+    env_file: /etc/agenticwf/agenticwf.env
+    volumes:
+      - agenticwf-data:/var/lib/agenticwf
+      # The agent's and the KB's settings (models in [llm] and [models], ...), edited on the host.
+      # After editing them: `docker compose up -d --force-recreate`. Keys go in agenticwf.env
+      # (api_key_env), not here.
+      - type: bind
+        source: /etc/agenticwf/agent.cfg
+        target: /etc/agenticwf/agent.cfg
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/agenticwf/kb.cfg
+        target: /etc/agenticwf/kb.cfg
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+
+volumes:
+  agenticwf-data:
