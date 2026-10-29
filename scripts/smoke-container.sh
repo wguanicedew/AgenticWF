@@ -111,7 +111,7 @@ check_signed_context() {
 check_kb_socket() {
     local principal
     # What the agent does: X-KB-Principal over the KB's service socket, as the OS user `agent`.
-    principal=$(printf '{"subject":"ci-user","scopes":["knowledge:read"]}' | base64 | tr '+/' '-_' | tr -d '=\n')
+    principal=$(printf '{"subject":"ci-user","user_id":"ci-user","scopes":["knowledge:read"]}' | base64 | tr '+/' '-_' | tr -d '=\n')
     for _ in $(seq 1 30); do
         $DOCKER exec "$NAME" test -S /run/agenticwf-kb/kb.sock && break; sleep 2
     done
@@ -187,7 +187,7 @@ EOF
 }
 
 kb_principal() {   # the agent's X-KB-Principal for ci-user, allowed to write
-    printf '{"subject":"ci-user","scopes":["knowledge:read","knowledge:write"]}' | base64 | tr '+/' '-_' | tr -d '=\n'
+    printf '{"subject":"ci-user","user_id":"ci-user","scopes":["knowledge:read","knowledge:write"]}' | base64 | tr '+/' '-_' | tr -d '=\n'
 }
 kb_token() { $DOCKER exec "$NAME" agenticwf-kb token; }
 
