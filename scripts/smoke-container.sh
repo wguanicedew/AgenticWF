@@ -259,7 +259,7 @@ check_m2m_token() {
         [[ ${line,,} == x-auth-context:* || ${line,,} == x-auth-context-sig:* ]] && headers+=(-H "$line")
     done < <(curl -fsS -D - -o /dev/null -H "Authorization: Bearer $token" \
         -H "X-Forwarded-Method: GET" -H "X-Forwarded-Uri: /api/v1/me" "http://127.0.0.1:$P_AUTHSVC/verify")
-    (( ${#headers[@]} == 2 )) || fail "authsvc /verify did not sign a context for the ci app's token"
+    (( ${#headers[@]} == 4 )) || fail "authsvc /verify did not sign a context for the ci app's token"
     curl -fsS "${headers[@]}" "http://127.0.0.1:$P_AGENT/api/v1/me" | grep -q "\"subject\":\"$id\"" \
         || fail "agent /api/v1/me with the context authsvc signed"
     echo "   ok: Logto token -> authsvc /verify -> agent (machine app $id)"
@@ -347,6 +347,8 @@ check_local_knowledge() {   # check_local_knowledge <services>
         $DOCKER exec "$NAME" grep -qx 'wiki_enabled = true' /run/agenticwf/kb.cfg || fail "kb.cfg: wiki not on by default"
         $DOCKER exec "$NAME" grep -qx 'memory_enabled = true' /run/agenticwf/kb.cfg || fail "kb.cfg: memory not on by default"
         $DOCKER exec "$NAME" grep -qx 'web = true' /run/agenticwf/kb.cfg || fail "kb.cfg: web search not on by default"
+        $DOCKER exec "$NAME" grep -qx 'embedding_timeout = 180' /run/agenticwf/kb.cfg || fail "kb.cfg: embedding_timeout not 180 by default"
+        $DOCKER exec "$NAME" grep -qx 'max_concurrency = 2' /run/agenticwf/kb.cfg || fail "kb.cfg: embedding max_concurrency not 2 by default"
         echo "   ok: agent -> KB over the service socket, same user"
     else
         $DOCKER exec "$NAME" grep -qx 'url =' /run/agenticwf/agent.cfg || fail "agent.cfg [knowledge] not switched off"
