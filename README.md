@@ -269,6 +269,11 @@ supports_tools = true
 
 `default_embedding` applies to new KBs. An existing KB keeps its embedding model and dimension
 once its first item is indexed; changing them means a reindex (the KB's `docs/ingestion.md`).
+Unless `kb.cfg` sets them, the container gives embedding calls 180 s (`[models] embedding_timeout`;
+the KB's own default is 60 s) and at most 2 at a time per embedding model and KB process
+(`max_concurrency` on the model; a `[models] max_concurrency` also counts as set): a shared
+gateway's `e5-large-v2` otherwise times out (`model e5-large-v2: ; retrying`) while a document
+and its wiki ingest embed at once.
 Images built from older agent or KB sources read a `#` after a value as part of the value; keep
 comments on their own lines there.
 
@@ -332,7 +337,7 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
 
 | What | From | Default |
 |---|---|---|
-| API resource (`AUTH_AUDIENCES`) and its permissions | `LOGTO_API_NAME`, `LOGTO_API_SCOPES`, `LOGTO_API_TOKEN_TTL` | `AgenticWF API`; `app:access agent:use knowledge:read knowledge:write dataset:read dataset:write compute:submit admin` |
+| API resource (`AUTH_AUDIENCES`) and its permissions | `LOGTO_API_NAME`, `LOGTO_API_SCOPES`, `LOGTO_API_TOKEN_TTL` | `AgenticWF API`; `app:access agent:use knowledge:read knowledge:write code:read dataset:read dataset:write compute:submit admin` |
 | User roles and their permissions | `LOGTO_ROLES` (`name=permissions; …`, `*` = all) | `researcher`: everything except `dataset:write`, `compute:submit` and `admin`; `admin`: all |
 | Roles new users get | `LOGTO_DEFAULT_ROLES` | none, so an admin approves each account by assigning a role |
 | Browser login app (Traditional), redirect URIs from `APP_ORIGIN` + `APP_BASE_PATH` | `LOGTO_WEB_APP_NAME` | `AgenticWF Web`. Its ID and secret go to authsvc automatically. Skipped if you set `AUTH_WEB_CLIENT_ID` |
@@ -351,11 +356,20 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
   the env, not the console, for what the env names. The exception is the Custom JWT: once you
   edit it in the console and remove its first line (`// managed by agenticwf…`), it's left alone.
   `LOGTO_BOOTSTRAP=false` turns all of this off.
+- **New permissions on an installed system** (e.g. `code:read`, for the agent's `search_code` and
+  `read_file`). With the default `LOGTO_API_SCOPES` and `LOGTO_ROLES`, the next start of the new image
+  creates the permission and adds it to `researcher` and `admin`; nothing to do in the console. Two
+  things are yours, in `/etc/agenticwf/agenticwf.env`: if you set `LOGTO_API_SCOPES` or `LOGTO_ROLES`
+  yourself, add the permission there; and add it to `AUTH_WEB_SCOPES`, because a browser token only
+  carries the permissions the web app asks for. People get it at their next sign-in (CLI users:
+  `AGENTICWF_SCOPES`, then `agenticwf login`).
 - **What it produces:**
   - `/var/lib/agenticwf/logto/clients.env`: the CLI settings for laptops (`AGENTICWF_AUTH_URL`,
     `AGENTICWF_API_URL`, `AGENTICWF_RESOURCE`, `AGENTICWF_CLIENT_ID`):
     `docker exec agenticwf cat /var/lib/agenticwf/logto/clients.env`.
-    With them, the client packages (`agenticwf-auth-client` from AgenticWF-auth `cli/`, plus
+    authsvc also publishes them at `https://<host>/app/auth/config`, so on a laptop
+    `AGENTICWF_API_URL` (or `AGENTICWF_KB_URL=https://<host>/app/kb`, `AGENTICWF_AGENT_URL`) alone is
+    enough. With them, the client packages (`agenticwf-auth-client` from AgenticWF-auth `cli/`, plus
     `agenticwf-kb-client` and `agenticwf-agent-client` from the `client/` of each service repo) give
     `agenticwf login`, `agenticwf token`, `agenticwf kb …` and `agenticwf agent …`.
   - `/var/lib/agenticwf/secrets/logto-apps/<name>.env`: each machine app's

@@ -27,6 +27,13 @@ if [[ -z "${AUTH_MGMT_CLIENT_ID:-}" && -s "$DATA_ROOT/secrets/auth_mgmt_client_i
     export AUTH_MGMT_CLIENT_ID
 fi
 
+# The CLI app (device flow) created by logto-bootstrap, unless AUTH_CLI_CLIENT_ID is given: authsvc
+# publishes it at /auth/config, so `agenticwf` finds the sign-in from a service's URL alone.
+if [[ -z "${AUTH_CLI_CLIENT_ID:-}" && -r "$DATA_ROOT/logto/clients.env" ]]; then
+    AUTH_CLI_CLIENT_ID=$(sed -n 's/^AGENTICWF_CLIENT_ID=//p' "$DATA_ROOT/logto/clients.env" | head -n 1)
+    export AUTH_CLI_CLIENT_ID
+fi
+
 # The profile link next to the user's name: Logto's Account Center, which logto-bootstrap turns on
 # unless LOGTO_ACCOUNT_CENTER=off. AUTH_ACCOUNT_URL= (empty) hides the link.
 if [[ -z "${AUTH_ACCOUNT_URL+x}" && "${LOGTO_ACCOUNT_CENTER:-on}" != "off" && -n "${LOGTO_ENDPOINT:-}" ]]; then

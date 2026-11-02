@@ -54,7 +54,7 @@ RUN --mount=type=bind,from=pg-search-version,source=/pg_search_version,target=/t
     dnf -qy module disable postgresql; \
     dnf -y install --setopt=install_weak_deps=False \
         "postgresql${POSTGRES_MAJOR}-server" "postgresql${POSTGRES_MAJOR}-contrib" "pgvector_${POSTGRES_MAJOR}" \
-        "${PYTHON}" "${PYTHON}-pip" supervisor openssl procps-ng tar gzip xz; \
+        "${PYTHON}" "${PYTHON}-pip" supervisor openssl procps-ng tar gzip xz git-core; \
     dnf -y install \
         "https://github.com/paradedb/paradedb/releases/download/v${PG_SEARCH_VERSION}/pg_search_${POSTGRES_MAJOR}-${PG_SEARCH_VERSION}-1PARADEDB.el9.${arch}.rpm"; \
     for ext in vector pg_search pg_trgm; do \

@@ -105,6 +105,8 @@ if has agent; then
     install -d -m 0755 "$AGENT_DATA_ROOT"
     install -d -m 0711 -o root -g root "$AGENT_DATA_ROOT/secrets"
     install -d -m 0750 -o agent -g agent "$AGENT_DATA_ROOT/sandboxes" "$AGENT_DATA_ROOT/logs"
+    # Repositories search_code and read_file read (agent.cfg [code] root), cloned by the agent.
+    install -d -m 0750 -o agent -g agent "$AGENT_DATA_ROOT/code"
 fi
 
 # --- 2. secrets ------------------------------------------------------------------------------
@@ -376,7 +378,10 @@ fi
 # The KB's web search, wiki and memory, on unless KB_WEB / KB_WIKI / KB_MEMORY say otherwise:
 # the [features] switches, and for the wiki and memory what a new document KB starts with
 # ([knowledge_bases]; each KB's owner can still switch them off). Chat models ([models.chat.*])
-# that don't say get supports_tools = true, which agentic search's smart preset needs. Written
+# that don't say get supports_tools = true, which agentic search's smart preset needs. Embedding
+# calls get 180 s ([models] embedding_timeout) and at most 2 at a time per model and process
+# (max_concurrency), unless kb.cfg says otherwise: a shared gateway's e5-large-v2 times out at the
+# KB's 60 s and 4 when a document and its wiki ingest embed at once. Written
 # into a copy of kb.cfg (the image's or a mounted one), so these win over it.
 if has kb; then
     KB_WEB=$(bool truthy "${KB_WEB:-true}") KB_WIKI=$(bool truthy "${KB_WIKI:-true}")
@@ -395,9 +400,16 @@ for section, values in {"features": {"web": web, "wiki": wiki, "memory": memory}
         cfg.add_section(section)
     for key, value in values.items():
         cfg.set(section, key, value)
+if not cfg.has_section("models"):
+    cfg.add_section("models")
+if not cfg.has_option("models", "embedding_timeout"):
+    cfg.set("models", "embedding_timeout", "180")
 for section in cfg.sections():
     if section.startswith("models.chat.") and not cfg.has_option(section, "supports_tools"):
         cfg.set(section, "supports_tools", "true")
+    if (section.startswith("models.embedding.") and not cfg.has_option(section, "max_concurrency")
+            and not cfg.has_option("models", "max_concurrency")):
+        cfg.set(section, "max_concurrency", "2")
 with open(dst, "w") as out:
     cfg.write(out)
 PY

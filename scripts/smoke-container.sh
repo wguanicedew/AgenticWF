@@ -231,7 +231,7 @@ check_logto_bootstrap() {
     [[ $v == 1 ]] || fail "API resource: $v"
     v=$(logto_sql "SELECT string_agg(s.name, ' ' ORDER BY s.name) FROM roles r JOIN roles_scopes rs ON rs.role_id = r.id
                    JOIN scopes s ON s.id = rs.scope_id WHERE r.tenant_id = 'default' AND r.name = 'researcher'")
-    [[ $v == "agent:use app:access dataset:read knowledge:read knowledge:write" ]] || fail "role researcher: $v"
+    [[ $v == "agent:use app:access code:read dataset:read knowledge:read knowledge:write" ]] || fail "role researcher: $v"
     v=$(logto_sql "SELECT count(*) FROM roles WHERE tenant_id = 'default' AND name IN ('researcher', 'admin', 'ci (machine)')")
     [[ $v == 3 ]] || fail "roles: $v"
     v=$(logto_sql "SELECT string_agg(name || ':' || type, ',' ORDER BY name) FROM applications

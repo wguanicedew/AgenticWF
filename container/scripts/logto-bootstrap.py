@@ -75,14 +75,15 @@ SCOPE_DESCRIPTIONS = {
     "agent:use": "Use the agent: chats, tasks, task types, models",
     "knowledge:read": "Read and search the knowledge bases",
     "knowledge:write": "Add to and manage knowledge bases",
+    "code:read": "Search and read source code repositories; add repositories",
     "dataset:read": "Read datasets",
     "dataset:write": "Write datasets",
     "compute:submit": "Submit compute jobs",
     "admin": "Administer AgenticWF",
 }
-DEFAULT_API_SCOPES = ("app:access agent:use knowledge:read knowledge:write dataset:read dataset:write "
+DEFAULT_API_SCOPES = ("app:access agent:use knowledge:read knowledge:write code:read dataset:read dataset:write "
                       "compute:submit admin")
-DEFAULT_ROLES = "researcher=app:access agent:use knowledge:read knowledge:write dataset:read; admin=*"
+DEFAULT_ROLES = "researcher=app:access agent:use knowledge:read knowledge:write code:read dataset:read; admin=*"
 ACCOUNT_CENTER_FIELDS = ("name", "avatar", "profile", "email", "phone", "password", "username", "social",
                          "customData", "mfa", "passkey", "session", "trustedDevice")
 # avatar=Edit uploads the picture, which needs a storage provider set up in Logto.
