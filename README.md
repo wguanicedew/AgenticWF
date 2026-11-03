@@ -344,7 +344,7 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
 | CLI app (Native, device flow) | `LOGTO_CLI_APP`, `LOGTO_CLI_APP_NAME` | `agenticwf CLI` |
 | Machine-to-machine apps, each with its own role | `LOGTO_M2M_APPS` (`name=permissions; …`) | none |
 | authsvc's Management API app (groups, personal access tokens) and the organization roles of groups | `LOGTO_MANAGEMENT_APP`, `AUTH_GROUP_ADMIN_ROLE`, `AUTH_GROUP_MEMBER_ROLE` | on: `AgenticWF Management`, its ID and secret go to authsvc; roles `admin`, `member`. Skipped if you set `AUTH_MGMT_CLIENT_ID` |
-| Sign-up | `LOGTO_SIGNUP`: `email`, `closed` or `unmanaged` | `email`: email + password, the email verified by a code, password reset by email |
+| Sign-up | `LOGTO_SIGNUP`: `email`, `closed` or `unmanaged`; `LOGTO_SIGNUP_USERNAME`: `on` or `off` | `email`: email + password + a username (unless `LOGTO_SIGNUP_USERNAME=off`), the email verified by a code, password reset by email; email or username signs in. Accounts without a username (made before) are reported with their email as `username` |
 | Custom JWT: `roles` and `external_identity.groups` in access tokens | `LOGTO_CUSTOM_JWT` | on |
 | Account center for users: `$LOGTO_ENDPOINT/account/profile`, `/account/security`, `/account/sessions` | `LOGTO_ACCOUNT_CENTER`: `on`, `off` or `unmanaged`; `LOGTO_ACCOUNT_CENTER_FIELDS` (`field=Off\|ReadOnly\|Edit …`) | on: edit the display name, email, password, social sign-ins, MFA, passkeys and sessions; the username is read-only |
 | AgenticWF admin user (email + password, with roles) | `LOGTO_APP_ADMIN_EMAIL`, `LOGTO_APP_ADMIN_PASSWORD`, `LOGTO_APP_ADMIN_ROLES` | none; roles `admin` |

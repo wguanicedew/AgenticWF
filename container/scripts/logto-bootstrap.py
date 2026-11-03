@@ -11,8 +11,8 @@ supervisord program `logto-bootstrap` (root), started after Logto. It ensures, i
   * "AgenticWF Management": the Management API app authsvc uses for groups and personal access
     tokens (LOGTO_MANAGEMENT_APP; unless AUTH_MGMT_CLIENT_ID is given), and the organization roles
     of groups (AUTH_GROUP_ADMIN_ROLE, AUTH_GROUP_MEMBER_ROLE: `admin`, `member`)
-  * sign-up with email + password, the email verified by a code, and password reset by email
-    (LOGTO_SIGNUP)
+  * sign-up with email + password + a username, the email verified by a code, and password reset
+    by email (LOGTO_SIGNUP, LOGTO_SIGNUP_USERNAME)
   * the access-token Custom JWT that adds `roles` and `external_identity.groups` (LOGTO_CUSTOM_JWT)
   * Logto's account center: /account/profile, /account/security, /account/sessions
     (LOGTO_ACCOUNT_CENTER, LOGTO_ACCOUNT_CENTER_FIELDS)
@@ -405,15 +405,25 @@ def ensure_sign_up(api: Logto) -> None:
             log("sign-up closed: accounts are created by admins (or exist already)")
         return
 
+    # Email is the primary identifier (verified by code). A username is also collected at sign-up
+    # (LOGTO_SIGNUP_USERNAME, default on): it names what a user owns, e.g. a knowledge base
+    # `username:kb-name`. Either one signs in. Accounts made before keep no username until an
+    # admin sets one; authsvc then reports their email as the username.
+    with_username = truthy(env("LOGTO_SIGNUP_USERNAME", "on"))
     sign_up = current.get("signUp") or {}
     secondary = [s for s in sign_up.get("secondaryIdentifiers") or []
-                 if s.get("identifier") not in ("email", "emailOrPhone")]
+                 if s.get("identifier") not in ("email", "emailOrPhone", "username")]
+    if with_username:
+        secondary.insert(0, {"identifier": "username"})
     want_sign_up = {**sign_up, "identifiers": ["email"], "password": True, "verify": True,
                     "secondaryIdentifiers": secondary}
     methods = list((current.get("signIn") or {}).get("methods") or [])
     email = {"identifier": "email", "password": True, "verificationCode": False, "isPasswordPrimary": True}
     if not any(m.get("identifier") == "email" for m in methods):
         methods.insert(0, email)
+    username = {"identifier": "username", "password": True, "verificationCode": False, "isPasswordPrimary": True}
+    if with_username and not any(m.get("identifier") == "username" for m in methods):
+        methods.append(username)
     forgot = list(dict.fromkeys([*(current.get("forgotPasswordMethods") or []), "EmailVerificationCode"]))
     body = {"signInMode": "SignInAndRegister", "signUp": want_sign_up, "signIn": {"methods": methods},
             "forgotPasswordMethods": forgot}
@@ -426,7 +436,8 @@ def ensure_sign_up(api: Logto) -> None:
                     " Sign-up settings left unchanged.")
                 return
             raise
-        log("sign-up: email + password, email verified by code; password reset by email")
+        log("sign-up: email + password" + (" + username" if with_username else "")
+            + ", email verified by code; password reset by email")
 
 
 def ensure_custom_jwt(api: Logto) -> None:
