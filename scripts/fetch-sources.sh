@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Check out the three service repos at the refs pinned in sources.env, into .src/{auth,kb,agent}:
-# the build contexts of container/build.sh and the compose files.
+# Check out the service repos at the refs pinned in sources.env, into
+# .src/{auth,auth-logto,auth-keycloak,kb,agent}: the build contexts of container/build.sh and the
+# compose files.
 #
-#   scripts/fetch-sources.sh                  all three
+#   scripts/fetch-sources.sh                  all of them
 #   scripts/fetch-sources.sh kb               only some
 #   KB_REF=my-branch scripts/fetch-sources.sh kb
 #
 # git uses your own credentials (SSH agent, credential helper), so private repos work as for any
-# clone; or set AGENTICWF_TOKEN to a GitHub token with read access to the three repos (as in CI),
+# clone; or set AGENTICWF_TOKEN to a GitHub token with read access to the repos (as in CI),
 # used for https://github.com/ only and never written to .git/config. A checkout with local changes is left alone (with a warning), so you can work in .src/;
-# to build from a checkout elsewhere instead, set AUTH_SRC / KB_SRC / AGENT_SRC (README.md, Build).
+# to build from a checkout elsewhere instead, set AUTH_SRC / AUTH_LOGTO_SRC / AUTH_KEYCLOAK_SRC /
+# KB_SRC / AGENT_SRC (README.md, Build).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 # The pins, unless the environment overrides them.
 while IFS='=' read -r key value; do
-    [[ $key =~ ^(AUTH|KB|AGENT)_(REPO|REF)$ ]] || continue
+    [[ $key =~ ^(AUTH|AUTH_LOGTO|AUTH_KEYCLOAK|KB|AGENT)_(REPO|REF)$ ]] || continue
     [[ -n "${!key:-}" ]] || printf -v "$key" '%s' "$value"
 done < "$root/sources.env"
 
@@ -50,13 +52,15 @@ fetch() {   # fetch <name> <repo> <ref>
 }
 
 names=("$@")
-(( ${#names[@]} )) || names=(auth kb agent)
+(( ${#names[@]} )) || names=(auth auth-logto auth-keycloak kb agent)
 mkdir -p "$root/.src"
 for name in "${names[@]}"; do
     case "$name" in
         auth)  fetch auth "$AUTH_REPO" "$AUTH_REF" ;;
+        auth-logto)    fetch auth-logto "$AUTH_LOGTO_REPO" "$AUTH_LOGTO_REF" ;;
+        auth-keycloak) fetch auth-keycloak "$AUTH_KEYCLOAK_REPO" "$AUTH_KEYCLOAK_REF" ;;
         kb)    fetch kb "$KB_REPO" "$KB_REF" ;;
         agent) fetch agent "$AGENT_REPO" "$AGENT_REF" ;;
-        *) echo "fetch-sources: unknown source '$name' (auth, kb, agent)" >&2; exit 2 ;;
+        *) echo "fetch-sources: unknown source '$name' (auth, auth-logto, auth-keycloak, kb, agent)" >&2; exit 2 ;;
     esac
 done

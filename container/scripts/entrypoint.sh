@@ -2,24 +2,30 @@
 # Entrypoint of the all-in-one container: prepare persistent state in one pass, then hand over to
 # supervisord. It merges the three repos' entrypoints.
 #
-# AGENTICWF_MODE (default: server where the image has Logto, i.e. linux/amd64; else local):
-#   server  the shared deployment: Logto + authsvc + KB + agent behind host Caddy. The KB and the
-#           agent trust the context authsvc signs (KB_AUTH_MODE=authsvc, AGENT_AUTH_MODE=authsvc).
-#   local   personal use on a laptop/desktop, no Logto, authsvc or Caddy. The KB runs standalone,
+# AGENTICWF_MODE (default: server where the image has Logto, i.e. linux/amd64, or where
+# AGENTICWF_AUTH_PROVIDER is set; else local):
+#   server  the shared deployment: identity provider + authsvc + KB + agent behind host Caddy. The
+#           KB and the agent trust the context authsvc signs (KB_AUTH_MODE=authsvc,
+#           AGENT_AUTH_MODE=authsvc), whichever provider authsvc uses.
+#   local   personal use on a laptop/desktop, no identity provider, authsvc or Caddy. The KB runs standalone,
 #           the agent in local mode, each with its own access token; both act for one user,
 #           AGENTICWF_LOCAL_USER. With AGENTICWF_LOCAL_HINT, their sign-in pages show the token to
 #           whoever gives it.
+# AGENTICWF_AUTH_PROVIDER (server mode): the identity provider authsvc uses, both in the image:
+#   logto     (default) Logto OSS, configured from the environment by logto-bootstrap
+#   keycloak  Keycloak under KEYCLOAK_PATH (/idp), the AgenticWF realm imported on first boot
 # AGENTICWF_SERVICES picks "agent", "kb" or "agent kb" (default) in both modes; server mode runs
-# Logto and authsvc besides. The agent reaches the KB (when both run) through the KB's service
+# the identity provider and authsvc besides. The agent reaches the KB (when both run) through the KB's service
 # listener on /run/agenticwf-kb/kb.sock.
 #
 #  1. check settings; create /var/lib/agenticwf/{pgdata,secrets,kb,agent}
-#  2. secrets: server: Logto/authsvc database passwords and the AuthContext secret; local: the KB's
-#     access token. The Fernet keys of the KB and the agent. Generated on first boot.
-#  3. one PostgreSQL cluster: TCP 127.0.0.1 with passwords for Logto and authsvc, the Unix socket
+#  2. secrets: server: the provider's and authsvc's database passwords, the AuthContext secret (and
+#     Keycloak's admin and client secrets); local: the KB's access token. The Fernet keys of the KB and the agent. Generated on first boot.
+#  3. one PostgreSQL cluster: TCP 127.0.0.1 with passwords for Logto or Keycloak and authsvc, the Unix socket
 #     with peer authentication for kb and agent; pg_search preloaded for the KB
 #  4. on every boot: roles, databases and the KB's extensions for the services that run
-#  5. settings for supervisord (which programs start), then exec it
+#  5. Keycloak: the AgenticWF realm for --import-realm
+#  6. settings for supervisord (which programs start), then exec it
 set -euo pipefail
 
 DATA_ROOT=${DATA_ROOT:-/var/lib/agenticwf}
@@ -30,6 +36,9 @@ KB_DATA_ROOT=${KB_DATA_ROOT:-$DATA_ROOT/kb}
 AGENT_DATA_ROOT=${AGENT_DATA_ROOT:-$DATA_ROOT/agent}
 LOGTO_DB_NAME=${LOGTO_DB_NAME:-logto}
 LOGTO_DB_USER=${LOGTO_DB_USER:-logto}
+KEYCLOAK_DB_NAME=${KEYCLOAK_DB_NAME:-keycloak}
+KEYCLOAK_DB_USER=${KEYCLOAK_DB_USER:-keycloak}
+KC_DIR=$DATA_ROOT/keycloak
 KB_DB_NAME=${KB_DB_NAME:-kb}
 AGENT_DB_NAME=${AGENT_DB_NAME:-agent}
 KB_SOCKET_DIR=/run/agenticwf-kb
@@ -52,10 +61,30 @@ AGENTICWF_SERVICES=${AGENTICWF_COMPOSE_SERVICES:-${AGENTICWF_SERVICES:-}}
 AGENTICWF_LOCAL_USER=${AGENTICWF_COMPOSE_LOCAL_USER:-${AGENTICWF_LOCAL_USER:-${AGENTICWF_HOST_USER:-}}}
 unset AGENTICWF_COMPOSE_SERVICES AGENTICWF_COMPOSE_LOCAL_USER
 
-# One image for both modes; without AGENTICWF_MODE, server where the image has Logto (amd64),
-# else local (arm64 has no Logto).
-if [[ -d /opt/logto ]]; then MODE=${AGENTICWF_MODE:-server}; else MODE=${AGENTICWF_MODE:-local}; fi
-# AGENTICWF_SERVICES: the KB and/or the agent (default both); server mode adds auth (Logto, authsvc).
+# The identity provider of server mode: AGENTICWF_AUTH_PROVIDER, else Logto where the image has it,
+# else Keycloak.
+if [[ -d /opt/logto ]]; then PROVIDER=${AGENTICWF_AUTH_PROVIDER:-logto}; else PROVIDER=${AGENTICWF_AUTH_PROVIDER:-keycloak}; fi
+PROVIDER=${PROVIDER,,}
+# authsvc settings whose values differ between the providers. One env file can hold both:
+# LOGTO_AUTH_X and KEYCLOAK_AUTH_X set AUTH_X for that provider only, and win over a plain AUTH_X
+# (which still applies to whichever provider runs).
+for name in AUTH_AUDIENCES AUTH_WEB_SCOPES AUTH_WEB_CLIENT_ID AUTH_MGMT_CLIENT_ID AUTH_CLI_CLIENT_ID \
+            AUTH_ACCOUNT_URL AUTH_ROLES_CLAIM; do
+    for p in LOGTO KEYCLOAK; do
+        var=${p}_$name
+        [[ -n "${!var+x}" ]] || continue
+        if [[ $p == "${PROVIDER^^}" ]]; then
+            [[ -z "${!name+x}" || "${!name}" == "${!var}" ]] || log "$var overrides $name"
+            export "$name=${!var}"
+        fi
+        unset "$var"
+    done
+done
+# One image for both modes; without AGENTICWF_MODE, server where the image has Logto (amd64) or a
+# provider is chosen, else local (arm64 has no Logto).
+if [[ -d /opt/logto || -n ${AGENTICWF_AUTH_PROVIDER:-} ]]; then MODE=${AGENTICWF_MODE:-server}; else MODE=${AGENTICWF_MODE:-local}; fi
+# AGENTICWF_SERVICES: the KB and/or the agent (default both); server mode adds auth (the identity
+# provider and authsvc).
 SERVICES=""
 services_spec=${AGENTICWF_SERVICES:-agent kb}
 for s in ${services_spec//,/ }; do
@@ -68,12 +97,37 @@ done
 [[ -n "$SERVICES" ]] || fail "AGENTICWF_SERVICES names no service (agent, kb or \"agent kb\")."
 case "$MODE" in
     server)
-        [[ -d /opt/logto ]] || fail "this image has no Logto ($(uname -m)): server mode needs linux/amd64; use AGENTICWF_MODE=local."
         SERVICES="auth$SERVICES"
-        : "${LOGTO_ENDPOINT:?LOGTO_ENDPOINT must be set, e.g. https://auth.example.com}"
-        : "${AUTH_AUDIENCES:?AUTH_AUDIENCES must be set to the Logto API resource indicator(s)}"
-        # Admin console: own public URL, or (default) localhost only, reached via SSH tunnel.
-        export LOGTO_ADMIN_ENDPOINT=${LOGTO_ADMIN_ENDPOINT:-http://localhost:3002}
+        case "$PROVIDER" in
+            logto)
+                [[ -d /opt/logto ]] || fail "this image has no Logto ($(uname -m)): it needs linux/amd64 and AUTH_PROVIDERS with logto; use AGENTICWF_AUTH_PROVIDER=keycloak or AGENTICWF_MODE=local."
+                : "${LOGTO_ENDPOINT:?LOGTO_ENDPOINT must be set, e.g. https://auth.example.com}"
+                : "${AUTH_AUDIENCES:?LOGTO_AUTH_AUDIENCES (or AUTH_AUDIENCES) must be set to the Logto API resource indicator(s)}"
+                # Admin console: own public URL, or (default) localhost only, reached via SSH tunnel.
+                export LOGTO_ADMIN_ENDPOINT=${LOGTO_ADMIN_ENDPOINT:-http://localhost:3002}
+                ;;
+            keycloak)
+                [[ -d /opt/keycloak ]] || fail "this image has no Keycloak (built without it in AUTH_PROVIDERS); use AGENTICWF_AUTH_PROVIDER=logto."
+                : "${KEYCLOAK_URL:?KEYCLOAK_URL must be set to the public URL of Keycloak incl. its path, e.g. https://host.example.org/idp}"
+                KEYCLOAK_URL=${KEYCLOAK_URL%/}
+                # Built into the image (kc.sh build --http-relative-path); the URL must end with it.
+                KEYCLOAK_PATH=${KEYCLOAK_PATH:-/idp}
+                [[ "$KEYCLOAK_URL" == *"$KEYCLOAK_PATH" ]] || fail "KEYCLOAK_URL ($KEYCLOAK_URL) must end with the image's Keycloak path $KEYCLOAK_PATH."
+                export KEYCLOAK_URL KEYCLOAK_PATH
+                export KEYCLOAK_REALM=${KEYCLOAK_REALM:-agenticwf}
+                # The clients of the provisioned realm; authsvc and the realm template use the same ids.
+                export AUTH_AUDIENCES=${AUTH_AUDIENCES:-agenticwf-api}
+                [[ $AUTH_AUDIENCES == *://* ]] && log "AUTH_AUDIENCES ($AUTH_AUDIENCES) looks like a Logto API resource; with Keycloak it is the API client id (default agenticwf-api). Set it as LOGTO_AUTH_AUDIENCES so it applies to Logto only."
+                export KEYCLOAK_PROVISION_REALM=${KEYCLOAK_PROVISION_REALM:-1}
+                if [[ "$KEYCLOAK_PROVISION_REALM" == 1 ]]; then
+                    : "${APP_ORIGIN:?APP_ORIGIN must be set, e.g. https://host.example.org (redirect URIs of the realm)}"
+                    export AUTH_WEB_CLIENT_ID=${AUTH_WEB_CLIENT_ID:-agenticwf-web}
+                    export AUTH_MGMT_CLIENT_ID=${AUTH_MGMT_CLIENT_ID:-agenticwf-authsvc}
+                    export AUTH_CLI_CLIENT_ID=${AUTH_CLI_CLIENT_ID:-agenticwf-cli}
+                fi
+                ;;
+            *) fail "AGENTICWF_AUTH_PROVIDER must be logto or keycloak, not '$PROVIDER'." ;;
+        esac
         [[ "${KB_AUTH_MODE:-authsvc}" == authsvc ]] || fail "KB_AUTH_MODE must be authsvc in server mode (AGENTICWF_MODE=local for a personal KB)."
         [[ "${AGENT_AUTH_MODE:-authsvc}" == authsvc ]] || fail "AGENT_AUTH_MODE must be authsvc in server mode (AGENTICWF_MODE=local for a personal agent)."
         ;;
@@ -81,7 +135,7 @@ case "$MODE" in
     *) fail "AGENTICWF_MODE must be server or local, not '$MODE'." ;;
 esac
 has() { [[ " $SERVICES " == *" $1 "* ]]; }
-log "mode $MODE: ${SERVICES// /, }"
+if [[ $MODE == server ]]; then log "mode $MODE ($PROVIDER): ${SERVICES// /, }"; else log "mode $MODE: ${SERVICES// /, }"; fi
 
 for n in KB_WORKER_PROCESSES AGENT_WORKER_PROCESSES; do
     [[ "${!n:-0}" =~ ^[0-9]+$ ]] || fail "$n must be a number, not '${!n}'."
@@ -126,11 +180,32 @@ write_secret() {
 }
 
 if [[ $MODE == server ]]; then
-    write_secret LOGTO_DB_PASSWORD   "$SECRETS_DIR/logto_db_password"   "logto:logto"
     write_secret AUTHSVC_DB_PASSWORD "$SECRETS_DIR/authsvc_db_password" "authsvc:authsvc"
     # Shared by authsvc (signs) and the KB and agent (verify): group agenticwf.
     write_secret AUTH_CONTEXT_SECRET "$SECRETS_DIR/auth_context_secret" "root:agenticwf"
     export AUTH_CONTEXT_SECRET_FILE=$SECRETS_DIR/auth_context_secret
+    for u in authsvc kb agent; do
+        runuser -u "$u" -- test -r "$AUTH_CONTEXT_SECRET_FILE" || fail "$AUTH_CONTEXT_SECRET_FILE is not readable by $u."
+    done
+fi
+if [[ $MODE == server && $PROVIDER == keycloak ]]; then
+    write_secret KEYCLOAK_DB_PASSWORD    "$SECRETS_DIR/keycloak_db_password"    "keycloak:keycloak"
+    # The first (temporary) master-realm admin, KEYCLOAK_ADMIN_USER (admin).
+    write_secret KEYCLOAK_ADMIN_PASSWORD "$SECRETS_DIR/keycloak_admin_password" "keycloak:keycloak"
+    # Client secrets of the realm's confidential clients (browser login, Admin API).
+    if [[ "$KEYCLOAK_PROVISION_REALM" == 1 || -n "${AUTH_WEB_CLIENT_SECRET:-}" || -s "$SECRETS_DIR/auth_web_client_secret" ]]; then
+        write_secret AUTH_WEB_CLIENT_SECRET "$SECRETS_DIR/auth_web_client_secret" "authsvc:authsvc"
+    fi
+    if [[ "$KEYCLOAK_PROVISION_REALM" == 1 || -n "${AUTH_MGMT_CLIENT_SECRET:-}" || -s "$SECRETS_DIR/auth_mgmt_client_secret" ]]; then
+        write_secret AUTH_MGMT_CLIENT_SECRET "$SECRETS_DIR/auth_mgmt_client_secret" "authsvc:authsvc"
+    fi
+    install -d -m 0750 -o keycloak -g keycloak "$KC_DIR" "$KC_DIR/import"
+    # The realm's SMTP password, if any (keycloak-bootstrap sets the realm's email from it).
+    if [[ -n "${KEYCLOAK_SMTP_PASSWORD:-}" ]]; then
+        write_secret KEYCLOAK_SMTP_PASSWORD "$SECRETS_DIR/keycloak_smtp_password" "keycloak:keycloak"
+    fi
+elif [[ $MODE == server ]]; then
+    write_secret LOGTO_DB_PASSWORD   "$SECRETS_DIR/logto_db_password"   "logto:logto"
     # Browser login with a web app made by hand (AUTH_WEB_CLIENT_ID); otherwise logto-bootstrap.
     if [[ -n "${AUTH_WEB_CLIENT_SECRET:-}" || -s "$SECRETS_DIR/auth_web_client_secret" ]]; then
         write_secret AUTH_WEB_CLIENT_SECRET "$SECRETS_DIR/auth_web_client_secret" "authsvc:authsvc"
@@ -154,9 +229,6 @@ if [[ $MODE == server ]]; then
     install -d -m 0755 -o logto -g logto "$DATA_ROOT/logto"
     # logto-bootstrap's result for this boot (start-authsvc-aio.sh waits for it).
     rm -f "$RUN_DIR/logto-bootstrap.done" "$RUN_DIR/logto-bootstrap.failed"
-    for u in authsvc kb agent; do
-        runuser -u "$u" -- test -r "$AUTH_CONTEXT_SECRET_FILE" || fail "$AUTH_CONTEXT_SECRET_FILE is not readable by $u."
-    done
 else
     unset AUTH_CONTEXT_SECRET AUTH_CONTEXT_SECRET_FILE
     # Local mode: both services act for one user. Its subject is local:<login> in the KB and in the
@@ -257,7 +329,7 @@ if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
     cat >> "$PGDATA/postgresql.conf" <<EOF
 
 # --- agenticwf (all-in-one) ---
-# Logto and authsvc: TCP on 127.0.0.1 with passwords. kb and agent: the Unix socket, peer auth.
+# Logto or Keycloak, and authsvc: TCP on 127.0.0.1 with passwords. kb and agent: the Unix socket, peer auth.
 listen_addresses = '127.0.0.1'
 unix_socket_directories = '/run/postgresql'
 password_encryption = 'scram-sha-256'
@@ -298,8 +370,14 @@ SQL
 }
 
 if has auth; then
-    # Logto's seed creates a `logto_tenant_<db>` role, so the Logto user needs CREATEROLE.
-    ensure_password_db "$LOGTO_DB_USER" "$LOGTO_DB_NAME" "$SECRETS_DIR/logto_db_password" "CREATEROLE"
+    if [[ $PROVIDER == keycloak ]]; then
+        # Keycloak owns its database (it creates and migrates its schema itself).
+        ensure_password_db "$KEYCLOAK_DB_USER" "$KEYCLOAK_DB_NAME" "$SECRETS_DIR/keycloak_db_password" "NOCREATEROLE"
+    else
+        # Logto's seed creates a `logto_tenant_<db>` role, so the Logto user needs CREATEROLE.
+        ensure_password_db "$LOGTO_DB_USER" "$LOGTO_DB_NAME" "$SECRETS_DIR/logto_db_password" "CREATEROLE"
+    fi
+    # authsvc: browser sessions, personal access tokens, group join requests.
     ensure_password_db authsvc authsvc "$SECRETS_DIR/authsvc_db_password" "NOCREATEROLE"
 fi
 if has kb; then
@@ -319,14 +397,53 @@ pg pg_ctl -D "$PGDATA" -m fast -w stop >/dev/null
 trap - EXIT
 log "PostgreSQL ready"
 
-# --- 5. settings for supervisord and the programs --------------------------------------------
+# --- 5. Keycloak: the AgenticWF realm ---------------------------------------------------------
+
+# Rendered on every boot from the template (AgenticWF-auth-keycloak's container/config) and the
+# current settings. Keycloak imports it only while the realm does not exist (first boot): later
+# changes are made in its admin console, and a changed setting here (e.g. APP_ORIGIN) is not applied
+# to an existing realm.
+if has auth && [[ $PROVIDER == keycloak ]]; then
+    if [[ "$KEYCLOAK_PROVISION_REALM" == 1 ]]; then
+        app_base=${APP_BASE_PATH:-}
+        app_base=${app_base#/}; app_base=${app_base%/}
+        api_client=${AUTH_AUDIENCES%% *}; api_client=${api_client%%,*}
+        REALM_REALM=$KEYCLOAK_REALM \
+        REALM_API_CLIENT_ID=$api_client \
+        REALM_WEB_CLIENT_ID=$AUTH_WEB_CLIENT_ID \
+        REALM_CLI_CLIENT_ID=$AUTH_CLI_CLIENT_ID \
+        REALM_MGMT_CLIENT_ID=$AUTH_MGMT_CLIENT_ID \
+        REALM_WEB_CLIENT_SECRET=$(cat "$SECRETS_DIR/auth_web_client_secret") \
+        REALM_MGMT_CLIENT_SECRET=$(cat "$SECRETS_DIR/auth_mgmt_client_secret") \
+        REALM_APP_ORIGIN=${APP_ORIGIN%/} \
+        REALM_APP_URL=${APP_ORIGIN%/}${app_base:+/$app_base} \
+        REALM_REGISTRATION_ALLOWED=${KEYCLOAK_REGISTRATION_ALLOWED:-false} \
+            /opt/authsvc/venv/bin/python /usr/local/bin/render-realm.py /etc/agenticwf/keycloak/realm-agenticwf.json \
+                "$KC_DIR/import/$KEYCLOAK_REALM-realm.json"
+        chown keycloak:keycloak "$KC_DIR/import/$KEYCLOAK_REALM-realm.json"
+        chmod 0400 "$KC_DIR/import/$KEYCLOAK_REALM-realm.json"
+        # What the `agenticwf` CLI needs (also published at <application URL>/auth/config).
+        cat > "$KC_DIR/clients.env" <<EOF
+AGENTICWF_AUTH_URL=$KEYCLOAK_URL/realms/$KEYCLOAK_REALM
+AGENTICWF_API_URL=${APP_ORIGIN%/}${app_base:+/$app_base}
+AGENTICWF_CLIENT_ID=$AUTH_CLI_CLIENT_ID
+EOF
+        chmod 0644 "$KC_DIR/clients.env"
+    else
+        rm -f "$KC_DIR/import/"*.json
+    fi
+fi
+
+# --- 6. settings for supervisord and the programs --------------------------------------------
 
 export DATA_ROOT PGDATA PGBIN KB_DATA_ROOT LOGTO_DB_NAME LOGTO_DB_USER KB_DB_NAME AGENT_DB_NAME
-export AGENTICWF_MODE=$MODE AGENTICWF_SERVICES=$SERVICES
+export KEYCLOAK_DB_NAME KEYCLOAK_DB_USER
+export AGENTICWF_MODE=$MODE AGENTICWF_SERVICES=$SERVICES AGENTICWF_AUTH_PROVIDER=$PROVIDER
 if [[ $MODE == server ]]; then
     export KB_AUTH_MODE=authsvc AGENT_AUTH_MODE=authsvc
     # The listeners Caddy reaches. Server mode runs with `--network host`: 127.0.0.1 keeps the
     # services off the host's public interfaces, and Logto reaches the host's MTA on 127.0.0.1:25.
+    # (Keycloak binds LISTEN_HOST too, KC_HTTP_HOST.)
     export LISTEN_HOST=${LISTEN_HOST:-127.0.0.1}
 else
     export KB_AUTH_MODE=standalone AGENT_AUTH_MODE=local
@@ -336,17 +453,27 @@ else
 fi
 export LOG_LEVEL=${LOG_LEVEL:-info}
 export LOGTO_PORT=${LOGTO_PORT:-3001} LOGTO_ADMIN_PORT=${LOGTO_ADMIN_PORT:-3002}
+export KEYCLOAK_PORT=${KEYCLOAK_PORT:-8080} KEYCLOAK_MANAGEMENT_PORT=${KEYCLOAK_MANAGEMENT_PORT:-9000}
 export AUTHSVC_PORT=${AUTHSVC_PORT:-8010}
 export KB_PORT=${KB_PORT:-8020} AGENT_PORT=${AGENT_PORT:-8000}
 ports="$PGPORT $KB_PORT $AGENT_PORT"
-has auth && ports="$ports $LOGTO_PORT $LOGTO_ADMIN_PORT $AUTHSVC_PORT"
+if has auth; then
+    ports="$ports $AUTHSVC_PORT"
+    if [[ $PROVIDER == keycloak ]]; then
+        ports="$ports $KEYCLOAK_PORT $KEYCLOAK_MANAGEMENT_PORT"
+    else
+        ports="$ports $LOGTO_PORT $LOGTO_ADMIN_PORT"
+    fi
+fi
 [[ $(tr ' ' '\n' <<<"$ports" | sort | uniq -d) ]] && fail "ports must differ: $ports"
 unset PORT
 
 # Which supervisord programs start.
 bool() { if "$@"; then echo true; else echo false; fi; }
 AUTH_AUTOSTART=$(bool has auth) KB_AUTOSTART=$(bool has kb) AGENT_AUTOSTART=$(bool has agent)
-export AUTH_AUTOSTART KB_AUTOSTART AGENT_AUTOSTART
+LOGTO_AUTOSTART=$(bool eval 'has auth && [[ $PROVIDER == logto ]]')
+KEYCLOAK_AUTOSTART=$(bool eval 'has auth && [[ $PROVIDER == keycloak ]]')
+export AUTH_AUTOSTART KB_AUTOSTART AGENT_AUTOSTART LOGTO_AUTOSTART KEYCLOAK_AUTOSTART
 
 if has auth; then
     export AUTH_POLICY_FILE=${AUTH_POLICY_FILE:-/etc/agenticwf/policy.yaml}
@@ -442,7 +569,8 @@ fi
 
 # For healthcheck.sh and agenticwf-links (`docker exec` does not see this environment).
 {
-    for v in AGENTICWF_MODE AGENTICWF_SERVICES LISTEN_HOST PGPORT LOGTO_PORT AUTHSVC_PORT KB_PORT AGENT_PORT \
+    for v in AGENTICWF_MODE AGENTICWF_SERVICES AGENTICWF_AUTH_PROVIDER LISTEN_HOST PGPORT LOGTO_PORT \
+             KEYCLOAK_MANAGEMENT_PORT KEYCLOAK_PATH AUTHSVC_PORT KB_PORT AGENT_PORT \
              KB_PUBLIC_URL AGENT_PUBLIC_URL KB_TOKEN_FILE AGENTICWF_AGENT_HOME; do
         printf '%s=%q\n' "$v" "${!v:-}"
     done

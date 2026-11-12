@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Build the all-in-one image from the three service repos.
+# Build the all-in-one image from the service repos (auth with its Logto and Keycloak providers,
+# KB, agent).
 #
 #   container/build.sh [extra docker buildx build args...]
 #
 #   # from your own working copies of the three repos:
-#   AUTH_SRC=../AgenticWF-auth KB_SRC=../AgenticWF-KB AGENT_SRC=../AgenticWF-agent container/build.sh
+#   AUTH_SRC=../AgenticWF-auth AUTH_LOGTO_SRC=../AgenticWF-auth-logto \
+#   AUTH_KEYCLOAK_SRC=../AgenticWf-auth-keycloak KB_SRC=../AgenticWF-KB AGENT_SRC=../AgenticWF-agent \
+#       container/build.sh
+#   # only one identity provider in the image:
+#   container/build.sh --build-arg AUTH_PROVIDERS=keycloak
 #
-# One image for both modes (AGENTICWF_MODE=server or local at run time), built for this machine's
-# architecture: linux/amd64 has Logto (server and local); linux/arm64 has none (local only).
+# One image for both modes (AGENTICWF_MODE=server or local at run time) and both identity providers
+# (AGENTICWF_AUTH_PROVIDER=logto or keycloak), built for this machine's architecture: linux/amd64
+# has Logto and Keycloak; linux/arm64 has Keycloak only (server mode with Keycloak, and local).
 #
 # The service repos are checked out at the refs pinned in sources.env into .src/ first
 # (scripts/fetch-sources.sh), unless a *_SRC names another checkout.
@@ -16,6 +22,8 @@
 #   IMAGE        image tag                     (default agenticwf:latest)
 #   PLATFORM     the platform, e.g. linux/amd64 (default: this machine's)
 #   AUTH_SRC     agenticwf-auth checkout       (default .src/auth, fetched)
+#   AUTH_LOGTO_SRC     agenticwf-auth-logto checkout     (default .src/auth-logto, fetched)
+#   AUTH_KEYCLOAK_SRC  agenticwf-auth-keycloak checkout  (default .src/auth-keycloak, fetched)
 #   KB_SRC       agenticwf-kb checkout         (default .src/kb, fetched)
 #   AGENT_SRC    agenticwf-agent checkout      (default .src/agent, fetched)
 #                e.g. AUTH_SRC=../AgenticWF-auth to build your own working copy
@@ -37,15 +45,17 @@ DOCKER=${DOCKER:-docker}
 # The pinned sources for every *_SRC that is not given.
 fetch=()
 [[ -n "${AUTH_SRC:-}" ]] || { AUTH_SRC=$root/.src/auth; fetch+=(auth); }
+[[ -n "${AUTH_LOGTO_SRC:-}" ]] || { AUTH_LOGTO_SRC=$root/.src/auth-logto; fetch+=(auth-logto); }
+[[ -n "${AUTH_KEYCLOAK_SRC:-}" ]] || { AUTH_KEYCLOAK_SRC=$root/.src/auth-keycloak; fetch+=(auth-keycloak); }
 [[ -n "${KB_SRC:-}" ]] || { KB_SRC=$root/.src/kb; fetch+=(kb); }
 [[ -n "${AGENT_SRC:-}" ]] || { AGENT_SRC=$root/.src/agent; fetch+=(agent); }
 if (( ${#fetch[@]} )) && [[ "${FETCH:-1}" != 0 ]]; then
     "$root/scripts/fetch-sources.sh" "${fetch[@]}"
 fi
-for src in "$AUTH_SRC" "$KB_SRC" "$AGENT_SRC"; do
+for src in "$AUTH_SRC" "$AUTH_LOGTO_SRC" "$AUTH_KEYCLOAK_SRC" "$KB_SRC" "$AGENT_SRC"; do
     [[ "$src" == *://* || -d "$src" ]] || { echo "build.sh: no such directory: $src (run scripts/fetch-sources.sh)" >&2; exit 1; }
 done
-echo "[build] $IMAGE${PLATFORM:+ ($PLATFORM)} from auth=$AUTH_SRC kb=$KB_SRC agent=$AGENT_SRC"
+echo "[build] $IMAGE${PLATFORM:+ ($PLATFORM)} from auth=$AUTH_SRC auth-logto=$AUTH_LOGTO_SRC auth-keycloak=$AUTH_KEYCLOAK_SRC kb=$KB_SRC agent=$AGENT_SRC"
 
 if [[ "$DOCKER" == podman ]]; then
     build=(podman build)
@@ -62,6 +72,8 @@ NETWORK=${NETWORK:-host}
 exec "${build[@]}" \
     -f "$root/container/Dockerfile" \
     --build-context auth="$AUTH_SRC" \
+    --build-context auth-logto="$AUTH_LOGTO_SRC" \
+    --build-context auth-keycloak="$AUTH_KEYCLOAK_SRC" \
     --build-context kb="$KB_SRC" \
     --build-context agent="$AGENT_SRC" \
     -t "$IMAGE" \

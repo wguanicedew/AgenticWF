@@ -1,0 +1,165 @@
+# AgenticWF all-in-one container with Keycloak (AGENTICWF_AUTH_PROVIDER=keycloak), SEPARATE
+# hostnames (Keycloak, application).
+# Install exactly ONE AgenticWF site file into /etc/caddy/Caddyfile.d/ (imported by
+# /etc/caddy/Caddyfile, see ../Caddyfile):
+#   cp deploy/caddy/sites/agenticwf-keycloak-multi-host.caddyfile /etc/caddy/Caddyfile.d/
+#
+#   https://{$AGENTICWF_KEYCLOAK_HOST}/idp/*       Keycloak (OIDC endpoints, sign-in UI, account console)
+#   https://{$AGENTICWF_KEYCLOAK_HOST}/idp/admin/  Keycloak admin console (operator networks only)
+#   https://{$AGENTICWF_APP_HOST}<base>/        the agent: chat UI, REST API, SSE, WebSocket
+#   https://{$AGENTICWF_APP_HOST}<base>/kb/     the knowledge service: pages, REST API, MCP
+#   https://{$AGENTICWF_APP_HOST}<base>/auth/*  browser login (authsvc)
+#   https://{$AGENTICWF_APP_HOST}/jaeger/       optional Jaeger UI (/etc/caddy/jaeger-ui.d/), or
+#   https://{$AGENTICWF_APP_HOST}<base>/jaeger/ inside the application (/etc/caddy/jaeger-ui-app.d/)
+#
+# <base> is AGENTICWF_APP_BASE_PATH: empty (the default) puts the application at the root of its
+# hostname, e.g. /app puts it under /app/ (the bare hostname then redirects there). Caddy strips
+# <base>, so authsvc, policy.yaml, the agent and the KB see plain /api/v1/... and /kb/... paths.
+#
+# The container listens on (published on) 127.0.0.1:
+#   8080 Keycloak (under /idp)   8010 authsvc   8000 agent   8020 KB
+# If you change KEYCLOAK_PORT, AUTHSVC_PORT, AGENT_PORT or KB_PORT, change them here too.
+#
+# Placeholders come from Caddy's own process environment (no defaults on purpose), e.g. in
+# /etc/caddy/agenticwf.env (agenticwf-caddy.env.example):
+#   AGENTICWF_ACME_EMAIL=ops@example.org
+#   AGENTICWF_KEYCLOAK_HOST=auth.example.org
+#   AGENTICWF_APP_HOST=app.example.org
+#   AGENTICWF_ADMIN_ALLOWED_CIDRS="10.0.0.0/8 192.168.0.0/16"   (default: nobody but the host itself)
+#   AGENTICWF_APP_BASE_PATH=/app   optional: the application under /app/ (default: the root);
+#                                  a leading slash, no trailing one
+#
+# Container env to match (container/agenticwf.env.example):
+#   AGENTICWF_AUTH_PROVIDER=keycloak   KEYCLOAK_URL=https://<AGENTICWF_KEYCLOAK_HOST>/idp
+#   APP_ORIGIN=https://<AGENTICWF_APP_HOST>   APP_BASE_PATH=<the same as AGENTICWF_APP_BASE_PATH>
+
+(agenticwf_common) {
+	# Certificate via ACME; for a host certificate replace with
+	#   tls /etc/caddy/certs/hostcert.pem /etc/caddy/certs/hostkey.pem
+	tls {$AGENTICWF_ACME_EMAIL}
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Tracing (README.md, Caddy on the host). Trace context from clients is never trusted: Caddy starts
+# each trace, so a client cannot join, flood or force-sample the collector's traces. The `tracing`
+# directive itself is opt-in: it is in /etc/caddy/tracing.d/ (deploy/caddy/tracing/), and an empty
+# or missing directory only makes Caddy log "No files matching import glob pattern" once per load.
+(agenticwf_trace) {
+	request_header -traceparent
+	request_header -tracestate
+	request_header -baggage
+	import /etc/caddy/tracing.d/*.caddy
+}
+
+# The application's routes, below its base path (Caddy has stripped AGENTICWF_APP_BASE_PATH).
+(agenticwf_app) {
+	# Browser login endpoints are served by authsvc itself (same origin => first-party cookie).
+	handle /auth/* {
+		route {
+			request_header -X-Auth-*
+			import agenticwf_trace
+			reverse_proxy 127.0.0.1:8010
+		}
+	}
+
+	# Everything else: authenticate + authorize every request with authsvc.
+	handle {
+		# `route` keeps the directives in exactly this order.
+		route {
+			# 1. Never trust identity headers supplied by the client.
+			request_header -X-Auth-*
+			import agenticwf_trace   # the span holds forward_auth and the backend call
+
+			# 2. Pre-check with authsvc. Caddy sends the original method/URI as
+			#    X-Forwarded-Method / X-Forwarded-Uri plus the client's Authorization,
+			#    Cookie, Origin and Upgrade headers. Non-2xx responses go to the client
+			#    unchanged: 401/403/503 JSON for API calls, 302 -> /auth/login for page loads.
+			forward_auth 127.0.0.1:8010 {
+				uri /verify
+				# The auth sub-request must stay a plain GET even for WebSocket handshakes;
+				# authsvc still sees the upgrade intent (for its Origin check).
+				header_up X-Forwarded-Upgrade {http.request.header.Upgrade}
+				header_up -Upgrade
+				header_up -Connection
+				copy_headers X-Auth-User-Id X-Auth-Client-Id X-Auth-Org-Id X-Auth-Roles X-Auth-Scopes X-Auth-Method X-Auth-Context X-Auth-Context-Sig
+			}
+
+			# 3. Backends, with the verified identity headers. The KB keeps its /kb prefix:
+			#    that is the path authsvc signed (the KB checks it, AUTH_BIND_REQUEST=true).
+			#    Uncomment to stop the raw bearer token from reaching the backends:
+			# request_header -Authorization
+			@kb path /kb /kb/*
+			handle @kb {
+				reverse_proxy 127.0.0.1:8020
+			}
+			handle {
+				reverse_proxy 127.0.0.1:8000
+			}
+		}
+	}
+}
+
+# --- Keycloak: sign-in, OIDC discovery, token and JWKS endpoints, account console ----
+{$AGENTICWF_KEYCLOAK_HOST} {
+	import agenticwf_common
+	request_header -X-Auth-*
+
+	handle /idp/* {
+		# The admin console, the Admin REST API and the master realm (where Keycloak's own admins
+		# sign in) only from operator networks. authsvc calls the Admin API inside the container.
+		@kc_admin {
+			path /idp/admin /idp/admin/* /idp/realms/master /idp/realms/master/*
+			not remote_ip {$AGENTICWF_ADMIN_ALLOWED_CIDRS:127.0.0.1/32}
+		}
+		respond @kc_admin "Forbidden" 403
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		respond "Not Found" 404
+	}
+}
+
+# --- Application: the agent and the KB --------------------------------------------
+#
+#   CLI / scripts : Authorization: Bearer <Keycloak access token or pat_…>
+#   Browser       : __Host-agenticwf_session cookie, obtained via /auth/login
+#   SSE/WebSocket : same cookie; reverse_proxy streams both without extra settings
+{$AGENTICWF_APP_HOST} {
+	import agenticwf_common
+
+	# Optional Jaeger UI under /jaeger/ (deploy/caddy/jaeger-ui/; README.md, Tracing). Like
+	# tracing.d, an empty or missing directory only makes Caddy log "No files matching import glob
+	# pattern" once per load.
+	import /etc/caddy/jaeger-ui.d/*.caddy
+
+	# The application under AGENTICWF_APP_BASE_PATH (empty: the root). With a base path, its bare
+	# form and the bare hostname redirect into it; the matchers never fire without one.
+	@app_no_slash `"{$AGENTICWF_APP_BASE_PATH}" != "" && {path} == "{$AGENTICWF_APP_BASE_PATH}"`
+	redir @app_no_slash {$AGENTICWF_APP_BASE_PATH}/ 308
+	@app_bare_host `"{$AGENTICWF_APP_BASE_PATH}" != "" && {path} == "/"`
+	redir @app_bare_host {$AGENTICWF_APP_BASE_PATH}/ 302
+	# The KB's own slash redirect would point at /kb/, outside the base path.
+	redir {$AGENTICWF_APP_BASE_PATH}/kb {$AGENTICWF_APP_BASE_PATH}/kb/ 308
+
+	handle_path {$AGENTICWF_APP_BASE_PATH}/* {
+		# Or the Jaeger UI inside the application, at <base>/jaeger/, with or without sign-in
+		# (deploy/caddy/jaeger-ui/agenticwf-jaeger-ui-{logto,network}.caddy; README.md, Tracing).
+		import /etc/caddy/jaeger-ui-app.d/*.caddy
+		import agenticwf_app
+	}
+
+	# With a base path: anything outside it and /jaeger.
+	handle {
+		respond "Not Found" 404
+	}
+}

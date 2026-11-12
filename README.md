@@ -4,30 +4,35 @@ One container running the whole AgenticWF stack:
 
 | Service | Repo | Port | Health |
 |---|---|---|---|
-| Logto (OIDC, sign-in) | AgenticWF-auth | 3001 | `/oidc/.well-known/openid-configuration` |
-| Logto admin console | AgenticWF-auth | 3002 | |
-| authsvc (`forward_auth`, browser login) | AgenticWF-auth | 8010 | `/healthz` |
+| Logto (OIDC, sign-in), `AGENTICWF_AUTH_PROVIDER=logto` (default) | AgenticWF-auth-logto | 3001 | `/oidc/.well-known/openid-configuration` |
+| Logto admin console | AgenticWF-auth-logto | 3002 | |
+| *or* Keycloak (OIDC, sign-in, consoles under `/idp`), `AGENTICWF_AUTH_PROVIDER=keycloak` | AgenticWF-auth-keycloak | 8080 (9000 health) | `/idp/health/ready` on 9000 |
+| authsvc (`forward_auth`, browser login) | AgenticWF-auth + the provider's package | 8010 | `/healthz` |
 | Knowledge service (`KB_AUTH_MODE=authsvc`) | AgenticWF-KB | 8020 | `/kb/health` |
 | Agent (`AGENT_AUTH_MODE=authsvc`) | AgenticWF-agent | 8000 | `/healthz` |
 
 supervisord runs them all, with one PostgreSQL 16 cluster (pgvector, pg_search) holding the
-databases `logto`, `authsvc`, `kb` and `agent`. The agent uses the KB through the KB's service
+databases `logto` (or `keycloak`), `authsvc`, `kb` and `agent`. The agent uses the KB through the KB's service
 listener on the in-container socket `/run/agenticwf-kb/kb.sock` (`agent.cfg [knowledge]`). All
 state lives in the volume `/var/lib/agenticwf`.
 
-For **personal use on a laptop or desktop** (the agent, the KB or both, without Logto, authsvc
-or Caddy), see [Local use](#local-use).
+Both identity providers are in the image; `AGENTICWF_AUTH_PROVIDER` picks the one that runs (see
+[Identity provider: Logto or Keycloak](#identity-provider-logto-or-keycloak)).
+
+For **personal use on a laptop or desktop** (the agent, the KB or both, without an identity
+provider, authsvc or Caddy), see [Local use](#local-use).
 
 ## Build
 
-Only this repo needs to be cloned. The three service repos (AgenticWF-auth, AgenticWF-KB,
-AgenticWF-agent) and the ref of each are pinned in [sources.env](sources.env).
+Only this repo needs to be cloned. The service repos (AgenticWF-auth, its providers
+AgenticWF-auth-logto and AgenticWF-auth-keycloak, AgenticWF-KB, AgenticWF-agent) and the ref of
+each are pinned in [sources.env](sources.env).
 [scripts/fetch-sources.sh](scripts/fetch-sources.sh) clones or updates them into `.src/` (ignored
 by git), and `container/build.sh` runs it first. CI reads the same file.
 
 ```sh
 git clone https://github.com/InnovateAILab/AgenticWF.git && cd AgenticWF
-container/build.sh                      # fetches .src/{auth,kb,agent}, then builds
+container/build.sh                      # fetches .src/{auth,auth-logto,auth-keycloak,kb,agent}, then builds
 ```
 
 - **Choosing versions.** To build other versions, change the refs in `sources.env` (a branch,
@@ -37,8 +42,9 @@ container/build.sh                      # fetches .src/{auth,kb,agent}, then bui
   BM25) is installed at the version the KB's own `container/Dockerfile` pins
   (`ARG PG_SEARCH_VERSION`), so the KB ref decides it too; `--build-arg PG_SEARCH_VERSION=…`
   builds another.
-- **Your own working copies.** `AUTH_SRC=../AgenticWF-auth`, `KB_SRC=…` and `AGENT_SRC=…` build
-  those checkouts instead; nothing is fetched for them. For compose, put these lines in a `.env`
+- **Your own working copies.** `AUTH_SRC=../AgenticWF-auth`, `AUTH_LOGTO_SRC=../AgenticWF-auth-logto`,
+  `AUTH_KEYCLOAK_SRC=../AgenticWf-auth-keycloak`, `KB_SRC=…` and `AGENT_SRC=…` build those
+  checkouts instead; nothing is fetched for them. For compose, put these lines in a `.env`
   file next to `compose.yaml` (git ignores it). You can also edit inside `.src/`: a checkout with
   local changes is never overwritten.
 - **Credentials and offline builds.** `git` uses your usual credentials, so private repos work.
@@ -58,15 +64,19 @@ One image, `agenticwf`, runs either mode; the environment picks it when the cont
 
 | `AGENTICWF_MODE` | For | Services |
 |---|---|---|
-| `server` (default) | the shared deployment behind Caddy | Logto + authsvc, plus `AGENTICWF_SERVICES` |
-| `local` | personal use on a laptop/desktop, no Logto | `AGENTICWF_SERVICES` |
+| `server` (default) | the shared deployment behind Caddy | the identity provider (`AGENTICWF_AUTH_PROVIDER`: Logto or Keycloak) + authsvc, plus `AGENTICWF_SERVICES` |
+| `local` | personal use on a laptop/desktop, no identity provider | `AGENTICWF_SERVICES` |
 
 `AGENTICWF_SERVICES` is `agent kb` (default), `kb` or `agent`, in both modes.
 
-| Platform | Has Logto | Modes |
+| Platform | Identity providers | Modes |
 |---|---|---|
-| linux/amd64 | yes | server and local |
-| linux/arm64 (Apple silicon) | no (Logto ships x64 native addons) | local only; the default mode there |
+| linux/amd64 | Logto and Keycloak | server (either provider) and local |
+| linux/arm64 (Apple silicon) | Keycloak only (Logto ships x64 native addons) | local (the default there), or server with `AGENTICWF_AUTH_PROVIDER=keycloak` |
+
+Both providers go into the image by default. `--build-arg AUTH_PROVIDERS=logto` (or `keycloak`)
+builds a smaller image with only one, e.g. `container/build.sh --build-arg AUTH_PROVIDERS=logto`
+leaves out Java and Keycloak.
 
 ```sh
 container/build.sh                          # agenticwf:latest for this machine's architecture
@@ -91,12 +101,14 @@ image also carries Node.js and Logto in local mode, so it is larger than the arm
   healthy, then checks the merged policy, the signed context (shared secret) on the agent and the
   KB, that the KB's service socket works for user `agent` only, and that a keyword-only KB finds
   a document by BM25 search (`pg_search`). It then restarts the container
-  on the same volume and checks again.
+  on the same volume and checks again. It runs twice: with Logto (a real Logto token through
+  authsvc to the agent) and with `AGENTICWF_AUTH_PROVIDER=keycloak` (the realm imported, with the
+  client secrets authsvc uses).
 - **Local mode:** the same image, through the smoke test's `local` suite. It starts the
-  container three times (KB only, agent only, both) and checks the access tokens, that Logto and
-  authsvc don't run, and the agent's link to the KB. Each run ends with a restart.
+  container three times (KB only, agent only, both) and checks the access tokens, that neither
+  identity provider nor authsvc runs, and the agent's link to the KB. Each run ends with a restart.
 - **Publish:** a pushed tag publishes `ghcr.io/<owner>/agenticwf` for linux/amd64 and
-  linux/arm64 (the arm64 image has no Logto). The image labels record each service repo's commit.
+  linux/arm64 (the arm64 image has no Logto, only Keycloak). The image labels record each service repo's commit.
 - **Client packages:** [scripts/build-clients.sh](scripts/build-clients.sh) builds
   `agenticwf-auth-client`, `agenticwf-kb-client` and `agenticwf-agent-client` (wheel and sdist)
   from the same service commits, with one version, the KB and agent clients depending on the auth
@@ -109,13 +121,14 @@ image also carries Node.js and Logto in local mode, so it is larger than the arm
   and variables → Actions. The first upload of a new project needs an account-scoped token.
 
 Which service commits get built comes from [sources.env](sources.env), the same file local
-builds use. A manual run's inputs, or the repository variables `AUTH_REF`, `KB_REF` and
-`AGENT_REF` (Settings → Variables), override it. A tag build that still uses `main` gets a
+builds use. A manual run's inputs, or the repository variables `AUTH_REF`, `AUTH_LOGTO_REF`,
+`AUTH_KEYCLOAK_REF`, `KB_REF` and `AGENT_REF` (Settings → Variables), override it. A tag build that still uses `main` gets a
 warning. If the service repos are private, add a token that can read them as the secret
 `AGENTICWF_TOKEN`.
 
-The smoke test also runs locally: `container/build.sh && scripts/smoke-container.sh` (server,
-amd64 only), and `scripts/smoke-container.sh agenticwf:latest local`.
+The smoke test also runs locally: `container/build.sh && scripts/smoke-container.sh` (server with
+Logto, amd64 only), `scripts/smoke-container.sh agenticwf:latest server keycloak`, and
+`scripts/smoke-container.sh agenticwf:latest local`.
 
 ## Local use
 
@@ -337,10 +350,10 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
 
 | What | From | Default |
 |---|---|---|
-| API resource (`AUTH_AUDIENCES`) and its permissions | `LOGTO_API_NAME`, `LOGTO_API_SCOPES`, `LOGTO_API_TOKEN_TTL` | `AgenticWF API`; `app:access agent:use knowledge:read knowledge:write code:read dataset:read dataset:write compute:submit admin` |
+| API resource (`LOGTO_AUTH_AUDIENCES`) and its permissions | `LOGTO_API_NAME`, `LOGTO_API_SCOPES`, `LOGTO_API_TOKEN_TTL` | `AgenticWF API`; `app:access agent:use knowledge:read knowledge:write code:read dataset:read dataset:write compute:submit admin` |
 | User roles and their permissions | `LOGTO_ROLES` (`name=permissions; …`, `*` = all) | `researcher`: everything except `dataset:write`, `compute:submit` and `admin`; `admin`: all |
 | Roles new users get | `LOGTO_DEFAULT_ROLES` | none, so an admin approves each account by assigning a role |
-| Browser login app (Traditional), redirect URIs from `APP_ORIGIN` + `APP_BASE_PATH` | `LOGTO_WEB_APP_NAME` | `AgenticWF Web`. Its ID and secret go to authsvc automatically. Skipped if you set `AUTH_WEB_CLIENT_ID` |
+| Browser login app (Traditional), redirect URIs from `APP_ORIGIN` + `APP_BASE_PATH` | `LOGTO_WEB_APP_NAME` | `AgenticWF Web`. Its ID and secret go to authsvc automatically. Skipped if you set `LOGTO_AUTH_WEB_CLIENT_ID` |
 | CLI app (Native, device flow) | `LOGTO_CLI_APP`, `LOGTO_CLI_APP_NAME` | `agenticwf CLI` |
 | Machine-to-machine apps, each with its own role | `LOGTO_M2M_APPS` (`name=permissions; …`) | none |
 | authsvc's Management API app (groups, personal access tokens) and the organization roles of groups | `LOGTO_MANAGEMENT_APP`, `AUTH_GROUP_ADMIN_ROLE`, `AUTH_GROUP_MEMBER_ROLE` | on: `AgenticWF Management`, its ID and secret go to authsvc; roles `admin`, `member`. Skipped if you set `AUTH_MGMT_CLIENT_ID` |
@@ -360,7 +373,7 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
   `read_file`). With the default `LOGTO_API_SCOPES` and `LOGTO_ROLES`, the next start of the new image
   creates the permission and adds it to `researcher` and `admin`; nothing to do in the console. Two
   things are yours, in `/etc/agenticwf/agenticwf.env`: if you set `LOGTO_API_SCOPES` or `LOGTO_ROLES`
-  yourself, add the permission there; and add it to `AUTH_WEB_SCOPES`, because a browser token only
+  yourself, add the permission there; and add it to `LOGTO_AUTH_WEB_SCOPES`, because a browser token only
   carries the permissions the web app asks for. People get it at their next sign-in (CLI users:
   `AGENTICWF_SCOPES`, then `agenticwf login`).
 - **What it produces:**
@@ -399,11 +412,57 @@ On every start, once Logto is up, the `logto-bootstrap` program configures Logto
 - **Not covered.** Assigning roles to other users (approval) and the INDIGO IAM / GitHub
   connectors stay console steps.
 
+## Identity provider: Logto or Keycloak
+
+authsvc is provider-neutral (AgenticWF-auth); the provider plugs in as a package from its own repo
+(AgenticWF-auth-logto, AgenticWF-auth-keycloak). The image has both, and one setting in
+`/etc/agenticwf/agenticwf.env` picks the one that runs:
+
+```sh
+AGENTICWF_AUTH_PROVIDER=logto      # default
+AGENTICWF_AUTH_PROVIDER=keycloak
+```
+
+| | `logto` (default) | `keycloak` |
+|---|---|---|
+| Programs | `auth:logto`, `auth:logto-bootstrap`, `auth:authsvc` | `auth:keycloak`, `auth:authsvc` |
+| Setup at startup | `LOGTO_BOOTSTRAP` ([below](#logto-configuration-at-startup)): API resource, roles, apps, sign-up | The AgenticWF realm imported on first boot (clients, roles, generated secrets); later changes in Keycloak's admin console |
+| Required env | `LOGTO_ENDPOINT`, `LOGTO_AUTH_AUDIENCES` | `KEYCLOAK_URL` (ending in `/idp`), `APP_ORIGIN` |
+| Application path | `/app` on a single hostname (Logto owns `/`) | `/` or a path such as `/app` (Keycloak lives under `/idp`): `APP_BASE_PATH` in the container and `AGENTICWF_APP_BASE_PATH` in Caddy's environment, the same value (default empty) |
+| Caddy site files | `agenticwf-single-host.caddyfile` / `agenticwf-multi-host.caddyfile` | `agenticwf-keycloak-single-host.caddyfile` / `agenticwf-keycloak-multi-host.caddyfile` |
+| Admin console | 3002 (SSH tunnel, or the `:8443` add-on) | `/idp/admin/`, only from `AGENTICWF_ADMIN_ALLOWED_CIDRS`; or `KEYCLOAK_ADMIN_URL` + SSH tunnel to 8080 |
+| First admin | `LOGTO_CONSOLE_ADMIN_*`, `LOGTO_APP_ADMIN_*` | `admin`, password in `/var/lib/agenticwf/secrets/keycloak_admin_password` |
+| CLI settings | `/var/lib/agenticwf/logto/clients.env` | `/var/lib/agenticwf/keycloak/clients.env` |
+| Email | default SMTP connector ([Email](#email-logto)) | set in the realm (Realm settings, Email) |
+
+authsvc settings whose values differ between the providers are prefixed in `agenticwf.env`, so one
+file can hold both: `LOGTO_AUTH_X` / `KEYCLOAK_AUTH_X` become authsvc's `AUTH_X` only when that
+provider runs (`AUDIENCES`, `WEB_SCOPES`, `WEB_CLIENT_ID`, `MGMT_CLIENT_ID`, `CLI_CLIENT_ID`,
+`ACCOUNT_URL`, `ROLES_CLAIM`). A plain `AUTH_X` still works and applies to either provider. For
+example, Logto's `AUTH_WEB_SCOPES` (`app:access …`) used with Keycloak fails every sign-in with
+`invalid_scope`, while `LOGTO_AUTH_WEB_SCOPES` is simply ignored there.
+
+The KB and the agent don't change: they trust the `AuthContext` authsvc signs, whichever provider
+authenticated the user. `docker exec agenticwf agenticwf-links` prints the provider's CLI settings.
+
+Each provider keeps its users in its own database (`logto` or `keycloak`), so switching an
+existing deployment starts with no users and no groups. Install the matching Caddy site file and
+recreate the container (`docker compose up -d --force-recreate`). Logto- and Keycloak-only settings
+in the env file are ignored by the other provider; the Keycloak section of
+[container/agenticwf.env.example](container/agenticwf.env.example) lists its own. The provider
+repos' `docs/deployment.md` cover each provider in depth.
+
 ## Caddy on the host
 
 Caddy terminates TLS and sends every application request through authsvc (`forward_auth`) before
-it reaches the agent or the KB. The files are in [deploy/caddy/](deploy/caddy). Pick **one**
-layout:
+it reaches the agent or the KB. The files are in [deploy/caddy/](deploy/caddy). Pick the site
+files of your identity provider (`AGENTICWF_AUTH_PROVIDER`), and **one** layout of them: A, a
+single hostname, or B, separate hostnames. Whatever the layout, authsvc, `policy.yaml` and the
+services see plain `/api/v1/...` and `/kb/...` paths (Caddy strips the application's path prefix).
+Requests for `/kb` and `/kb/*` go to the KB (8020) and everything else to the agent (8000). The KB
+keeps its `/kb` prefix because that's the path authsvc signed.
+
+### With Logto
 
 | | **A. Single hostname** (`agenticwf-single-host.caddyfile`) | **B. Separate hostnames** (`agenticwf-multi-host.caddyfile`) |
 |---|---|---|
@@ -417,15 +476,71 @@ layout:
 | Container env | `LOGTO_ENDPOINT=https://host.example.org`, `APP_ORIGIN=https://host.example.org`, `APP_BASE_PATH=/app` | `LOGTO_ENDPOINT=https://auth.example.org`, `LOGTO_ADMIN_ENDPOINT=https://auth-admin.example.org`, `APP_ORIGIN=https://app.example.org`, `APP_BASE_PATH=` |
 
 In layout A Logto owns `/` (it cannot run under a path prefix), so the application lives under
-`/app`. Caddy strips `/app`, so authsvc, `policy.yaml` and the services see plain `/api/v1/...`
-and `/kb/...` paths. Requests for `/kb` and `/kb/*` go to the KB (8020) and everything else to the
-agent (8000). The KB keeps its `/kb` prefix because that's the path authsvc signed.
+`/app`.
+
+### With Keycloak
+
+Keycloak runs under `/idp` (built into the image), so it never needs the root: the application is
+at the root of its hostname, or under a path of your choice such as `/app`.
+
+| | **A. Single hostname** (`agenticwf-keycloak-single-host.caddyfile`) | **B. Separate hostnames** (`agenticwf-keycloak-multi-host.caddyfile`) |
+|---|---|---|
+| Needs | 1 DNS name, port 443 only | 2 DNS names (same IP is fine) |
+| Keycloak (sign-in, OIDC, account console) | `https://host.example.org/idp/` | `https://auth.example.org/idp/` |
+| Keycloak admin console | `https://host.example.org/idp/admin/`, only from `AGENTICWF_ADMIN_ALLOWED_CIDRS` | `https://auth.example.org/idp/admin/`, the same |
+| Agent (UI, REST, SSE, WebSocket) | `https://host.example.org<base>/` | `https://app.example.org<base>/` |
+| Knowledge service | `https://host.example.org<base>/kb/` | `https://app.example.org<base>/kb/` |
+| Browser login | `https://host.example.org<base>/auth/*` | `https://app.example.org<base>/auth/*` |
+| Caddy environment | `AGENTICWF_HOST`, `AGENTICWF_ACME_EMAIL`, `AGENTICWF_ADMIN_ALLOWED_CIDRS`, optional `AGENTICWF_APP_BASE_PATH` | `AGENTICWF_KEYCLOAK_HOST`, `AGENTICWF_APP_HOST`, `AGENTICWF_ACME_EMAIL`, `AGENTICWF_ADMIN_ALLOWED_CIDRS`, optional `AGENTICWF_APP_BASE_PATH` |
+| Container env | `AGENTICWF_AUTH_PROVIDER=keycloak`, `KEYCLOAK_URL=https://host.example.org/idp`, `APP_ORIGIN=https://host.example.org`, `APP_BASE_PATH=<base>` | `AGENTICWF_AUTH_PROVIDER=keycloak`, `KEYCLOAK_URL=https://auth.example.org/idp`, `APP_ORIGIN=https://app.example.org`, `APP_BASE_PATH=<base>` |
+
+`<base>` is empty (the default: the application at the root) or a path such as `/app`. Set it
+twice, to the same value: `AGENTICWF_APP_BASE_PATH` in Caddy's environment and `APP_BASE_PATH` in
+the container's. With a base path, the bare hostname and `<base>` redirect to `<base>/`.
+
+```bash
+# /etc/caddy/agenticwf.env, layout A with the application under /app
+AGENTICWF_ACME_EMAIL=ops@example.org
+AGENTICWF_HOST=host.example.org
+AGENTICWF_ADMIN_ALLOWED_CIDRS="188.184.0.0/15 2001:1458::/32"
+AGENTICWF_APP_BASE_PATH=/app        # leave out for the root
+
+# /etc/agenticwf/agenticwf.env (the Keycloak section of container/agenticwf.env.example)
+AGENTICWF_AUTH_PROVIDER=keycloak
+KEYCLOAK_URL=https://host.example.org/idp
+APP_ORIGIN=https://host.example.org
+APP_BASE_PATH=/app                  # empty for the root
+```
+
+- **The two base paths must agree.** If the container has `APP_BASE_PATH=/app` and Caddy serves
+  the application at the root, every sign-in fails: authsvc answers `proxy_misconfigured` (the
+  login page would otherwise redirect to itself). `APP_BASE_PATH=/app` is set in the Logto
+  section of the env example; when switching from Logto, keep it and set
+  `AGENTICWF_APP_BASE_PATH=/app`, or comment it out for the root.
+- **The realm is imported once.** On first boot the AgenticWF realm gets its redirect URIs from
+  `APP_ORIGIN` and `APP_BASE_PATH` (`<APP_ORIGIN><base>/auth/callback`, sign-out to
+  `<APP_ORIGIN><base>/`). Changing either later is not applied to the existing realm: update the
+  `agenticwf-web` client's **Valid redirect URIs** and **Valid post logout redirect URIs** in the
+  admin console (`/idp/admin/`, realm `agenticwf`), else Keycloak rejects the sign-in with
+  `Invalid parameter: redirect_uri`.
+- **Admin console.** Caddy only lets `AGENTICWF_ADMIN_ALLOWED_CIDRS` reach `/idp/admin/` and the
+  master realm (unset: nobody but the host itself). Or use an SSH tunnel to the container's port:
+  `ssh -L 8080:127.0.0.1:8080 host`, then `http://localhost:8080/idp/admin/` (with
+  `KEYCLOAK_ADMIN_URL=http://localhost:8080/idp` in the container env). The first admin is `admin`,
+  its password is in `/var/lib/agenticwf/secrets/keycloak_admin_password`.
+- **Switching from Logto.** Browser sessions signed in with Logto end on their next request (their
+  tokens no longer verify) and the browser is sent to sign in again. CLI users run
+  `agenticwf login` again: `docker exec agenticwf agenticwf-links` prints the new settings.
+
+### Install
 
 ```bash
 sudo cp deploy/caddy/Caddyfile /etc/caddy/Caddyfile        # optional: the EL9 default already imports Caddyfile.d
 sudo rm -f /etc/caddy/Caddyfile.d/agenticwf-*.caddyfile    # switching layouts: remove the other one
-sudo cp deploy/caddy/sites/agenticwf-single-host.caddyfile /etc/caddy/Caddyfile.d/     # layout A
-#   or: sudo cp deploy/caddy/sites/agenticwf-multi-host.caddyfile /etc/caddy/Caddyfile.d/   # layout B
+sudo cp deploy/caddy/sites/agenticwf-single-host.caddyfile /etc/caddy/Caddyfile.d/     # Logto, layout A
+#   or: agenticwf-multi-host.caddyfile                                                  # Logto, layout B
+#   or: agenticwf-keycloak-single-host.caddyfile                                        # Keycloak, layout A
+#   or: agenticwf-keycloak-multi-host.caddyfile                                         # Keycloak, layout B
 
 # Caddy's environment (hostnames, ACME contact); no defaults on purpose
 sudo cp deploy/caddy/agenticwf-caddy.env.example /etc/caddy/agenticwf.env    # then edit it
@@ -440,20 +555,41 @@ sudo systemctl restart caddy        # restart, not reload, after changing the en
 
 - **Certificates.** By default the site files use ACME (Let's Encrypt, TLS-ALPN on 443). For a
   host reachable only inside a site network, replace `tls {$AGENTICWF_ACME_EMAIL}` with
-  `tls /etc/caddy/certs/hostcert.pem /etc/caddy/certs/hostkey.pem`. In layout A it's in the site
-  block; in layout B it's in the `(agenticwf_common)` snippet. The `caddy` user must be able to
-  read both files.
+  `tls /etc/caddy/certs/hostcert.pem /etc/caddy/certs/hostkey.pem`. In the Logto layout A it's in
+  the site block; in the other files it's in the `(agenticwf_common)` snippet. The `caddy` user
+  must be able to read both files.
 - **Missing environment.** If a hostname variable is unset, Caddy refuses to load with
   `server block without any key is global configuration`. That means the env file didn't reach
   Caddy. An unset `AGENTICWF_ADMIN_ALLOWED_CIDRS` fails closed: the admin console answers 403.
-- **Admin console on :8443 (layout A, development).** Also install
+- **Logto admin console on :8443 (layout A, development).** Also install
   `sites/agenticwf-admin-console.caddyfile`, set `AGENTICWF_ADMIN_ALLOWED_CIDRS`, and set
   `LOGTO_ADMIN_ENDPOINT=https://host.example.org:8443` in the container env. Port 8443 must be
   open in the host firewall.
-- **Ports.** The site files use the container's default ports (3001, 3002, 8010, 8000, 8020). If
-  you change `LOGTO_PORT`, `AUTHSVC_PORT`, `AGENT_PORT` or `KB_PORT`, change the site file too.
+- **Ports.** The site files use the container's default ports (Logto 3001 and 3002, Keycloak
+  8080, authsvc 8010, agent 8000, KB 8020). If you change `LOGTO_PORT`, `KEYCLOAK_PORT`,
+  `AUTHSVC_PORT`, `AGENT_PORT` or `KB_PORT`, change the site file too.
 - **Tracing (optional).** Caddy can start an OpenTelemetry trace for each application request
   and send it to Jaeger; see [Tracing](#tracing).
+
+## Reranker (optional)
+
+The KB re-orders search results by how well each passage answers the query. Out of the box a chat
+model on the CERN gateway grades them (`[models.rerank.cern-llm-rerank]`, one LLM call per
+search). A cross-encoder is faster and usually better: `compose.yaml` has an optional `reranker`
+service, BAAI/bge-reranker-v2-m3 on Hugging Face text-embeddings-inference, on 127.0.0.1:8081.
+
+```bash
+docker compose --profile reranker up -d reranker      # first start downloads the model (~2.3 GB)
+curl -s 127.0.0.1:8081/rerank -H 'Content-Type: application/json' \
+     -d '{"query":"what is a cryostat?","texts":["A cryostat keeps the magnet cold.","The shift starts at 7."]}'
+```
+
+Then in `/etc/agenticwf/kb.cfg` uncomment `[models.rerank.bge-reranker]` (`provider = tei`,
+`base_url = http://127.0.0.1:8081`), set `[models] default_rerank = bge-reranker`, and
+`docker compose up -d --force-recreate agenticwf`. Every KB without a reranker of its own uses it at
+once; nothing needs re-processing. The CPU build answers in about 0.5–2 s per search on a few
+cores; on a GPU host set `TEI_IMAGE` to the GPU build for the card and uncomment the `deploy` block
+(compose.yaml says which). If the reranker is down, searches keep the retrieval order (logged).
 
 ## Tracing
 
@@ -620,16 +756,20 @@ Then apply both with `docker compose up -d --force-recreate`. See the KB's
 
 ## What the build combines
 
-- `container/Dockerfile`: one venv per service under `/opt/{authsvc,kb,agent}/venv`. A `base`
-  stage, then the image: base + Node.js + Logto on amd64, base alone on arm64.
-- `AGENTICWF_MODE` (`server` or `local`) and `AGENTICWF_SERVICES` decide which
+- `container/Dockerfile`: one venv per service under `/opt/{authsvc,kb,agent}/venv`; authsvc's
+  has both provider packages (`agenticwf_auth_logto`, `agenticwf_auth_keycloak`). A `base` stage,
+  then the image: base + the providers in `AUTH_PROVIDERS` (Node.js + Logto on amd64 only;
+  Java 21 + Keycloak on every platform).
+- `AGENTICWF_MODE` (`server` or `local`), `AGENTICWF_AUTH_PROVIDER` (`logto` or `keycloak`) and
+  `AGENTICWF_SERVICES` decide which
   supervisord programs start, which databases and secrets the entrypoint prepares, and what
   `healthcheck.sh` checks.
 - Each repo's own start scripts and supervisord program files are used as they are, except
   `postgres.ini`, `kb.ini` and `agent.ini` (here: one shared cluster, a separate `PORT` per program).
-  auth's `rest-example` program (port 8000) is left out.
-- `container/scripts/entrypoint.sh` merges the three entrypoints: secrets, one `initdb`, roles,
-  databases and the KB's extensions.
+  The provider repos' `rest-example` program (port 8000) is left out.
+- `container/scripts/entrypoint.sh` merges the entrypoints (the chosen provider's, the KB's, the
+  agent's): secrets, one `initdb`, roles, databases, the KB's extensions and, for Keycloak, the
+  realm rendered from AgenticWF-auth-keycloak's template (`render-realm.py`).
 - `/etc/agenticwf/policy.yaml` is generated at build time by `container/scripts/merge-policy.py`
   from the KB's, the agent's and authsvc's route policies (in that order; first match wins), and
   checked with authsvc's loader.
@@ -640,10 +780,11 @@ Then apply both with `docker compose up -d --force-recreate`. See the KB's
   the agent's long-term memory is the KB's temporal memory; with `KB_MEMORY=false` the entrypoint
   sets `memory = false` and the agent keeps memories in its own database.
 - Logto is started by `container/scripts/start-logto-aio.sh`. It seeds Logto's database, adds the
-  default email connector (`logto-email-connector.py`), then runs AgenticWF-auth's
-  `start-logto.sh`.
+  default email connector (`logto-email-connector.py`), then runs AgenticWF-auth-logto's
+  `start-logto.sh`. Keycloak runs AgenticWF-auth-keycloak's `start-keycloak.sh` as it is.
 - `logto-bootstrap` (`container/scripts/logto-bootstrap.py`) configures Logto once it runs.
-  authsvc is started by `start-authsvc-aio.sh`, which waits for it, then runs AgenticWF-auth's
-  `start-authsvc.sh`.
-- `deploy/caddy/` is AgenticWF-auth's Caddy setup with the KB's `/kb` route added (from
+  authsvc is started by `start-authsvc-aio.sh`: with Logto it waits for logto-bootstrap, then
+  runs AgenticWF-auth-logto's `start-authsvc.sh` (installed as `start-authsvc-logto.sh`); with
+  Keycloak it runs AgenticWF-auth-keycloak's (`start-authsvc-keycloak.sh`).
+- `deploy/caddy/` is the provider repos' Caddy setup with the KB's `/kb` route added (from
   AgenticWF-KB `deploy/caddy/kb.caddyfile`).

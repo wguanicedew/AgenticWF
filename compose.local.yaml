@@ -23,6 +23,8 @@ services:
       network: host
       additional_contexts:
         auth: ${AUTH_SRC:-.src/auth}
+        auth-logto: ${AUTH_LOGTO_SRC:-.src/auth-logto}
+        auth-keycloak: ${AUTH_KEYCLOAK_SRC:-.src/auth-keycloak}
         kb: ${KB_SRC:-.src/kb}
         agent: ${AGENT_SRC:-.src/agent}
     environment:

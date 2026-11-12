@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# supervisord program `authsvc` (runs as user `authsvc`): wait until logto-bootstrap has configured
-# Logto (it creates the browser login app), then AgenticWF-auth's start-authsvc.sh.
+# supervisord program `authsvc` (runs as user `authsvc`) with the AGENTICWF_AUTH_PROVIDER's provider:
+#   keycloak  AgenticWF-auth-keycloak's start-authsvc.sh (the entrypoint has set the realm's clients)
+#   logto     wait until logto-bootstrap has configured Logto (it creates the browser login app),
+#             then AgenticWF-auth-logto's start-authsvc.sh
 set -euo pipefail
+
+case "${AGENTICWF_AUTH_PROVIDER:-logto}" in
+    keycloak) exec /usr/local/bin/start-authsvc-keycloak.sh ;;
+    logto) ;;
+    *) echo "[authsvc] unknown AGENTICWF_AUTH_PROVIDER '${AGENTICWF_AUTH_PROVIDER}'" >&2; exit 1 ;;
+esac
 
 for _ in $(seq 1 450); do
     [[ -e /run/agenticwf/logto-bootstrap.done || -e /run/agenticwf/logto-bootstrap.failed ]] && break
@@ -40,4 +48,4 @@ if [[ -z "${AUTH_ACCOUNT_URL+x}" && "${LOGTO_ACCOUNT_CENTER:-on}" != "off" && -n
     export AUTH_ACCOUNT_URL="${LOGTO_ENDPOINT%/}/account"
 fi
 
-exec /usr/local/bin/start-authsvc.sh
+exec /usr/local/bin/start-authsvc-logto.sh

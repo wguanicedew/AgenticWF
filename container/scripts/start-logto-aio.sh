@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # supervisord program `logto` (runs as user `logto`): seed Logto's database, add the default email
-# connector (logto-email-connector.py), then AgenticWF-auth's start-logto.sh starts Logto. Its own
+# connector (logto-email-connector.py), then AgenticWF-auth-logto's start-logto.sh starts Logto. Its own
 # `db seed --swe` is then a no-op.
 set -euo pipefail
 

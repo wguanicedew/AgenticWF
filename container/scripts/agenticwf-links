@@ -4,7 +4,7 @@
 #   docker exec agenticwf agenticwf-links agent|kb    one service's link, and its token on its own
 # Local mode: the agent's and the KB's sign-in links, with their access tokens (keep them private).
 # The sign-in pages show these commands (AGENT_LOCAL_TOKEN_HELP, KB_TOKEN_HELP from the entrypoint).
-# Server mode: the CLI settings that logto-bootstrap wrote.
+# Server mode: the CLI settings that logto-bootstrap or (Keycloak) the entrypoint wrote.
 set -euo pipefail
 # shellcheck source=/dev/null
 [[ -r /run/agenticwf/health.env ]] && . /run/agenticwf/health.env
@@ -20,10 +20,11 @@ for arg in "$@"; do
 done
 
 if [[ ${AGENTICWF_MODE:-} == server ]]; then
-    echo "Server mode: people sign in through Logto at APP_ORIGIN (README.md, Caddy on the host)."
-    if [[ -r /var/lib/agenticwf/logto/clients.env ]]; then
+    provider=${AGENTICWF_AUTH_PROVIDER:-logto}
+    echo "Server mode: people sign in through ${provider^} at APP_ORIGIN (README.md, Caddy on the host)."
+    if [[ -r /var/lib/agenticwf/$provider/clients.env ]]; then
         echo "agenticwf CLI settings:"
-        grep -v '^#' /var/lib/agenticwf/logto/clients.env
+        grep -v '^#' "/var/lib/agenticwf/$provider/clients.env"
     fi
     exit 0
 fi

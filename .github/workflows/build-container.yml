@@ -1,6 +1,6 @@
 name: Build container and clients
 
-# The all-in-one image (auth + KB + agent) from the three service repos. Checks and a smoke-tested
+# The all-in-one image (auth with its Logto and Keycloak providers + KB + agent) from the service repos. Checks and a smoke-tested
 # build on every push and pull request; published to ghcr.io when a tag is pushed.
 # The client packages (agenticwf-auth-client, agenticwf-kb-client, agenticwf-agent-client) are
 # built and install-tested on every run too; published to PyPI when a tag is pushed (the tag is
@@ -14,6 +14,12 @@ on:
     inputs:
       auth_ref:
         description: AgenticWF-auth ref (tag, branch or SHA)
+        required: false
+      auth_logto_ref:
+        description: AgenticWF-auth-logto ref
+        required: false
+      auth_keycloak_ref:
+        description: AgenticWF-auth-keycloak ref
         required: false
       kb_ref:
         description: AgenticWF-KB ref
@@ -38,8 +44,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/agenticwf
   # The service repos and refs come from sources.env (the "Service sources" step), as for
-  # scripts/fetch-sources.sh. A manual run's inputs or the repository variables AUTH_REF, KB_REF,
-  # AGENT_REF (Settings -> Variables) override the refs.
+  # scripts/fetch-sources.sh. A manual run's inputs or the repository variables AUTH_REF,
+  # AUTH_LOGTO_REF, AUTH_KEYCLOAK_REF, KB_REF, AGENT_REF (Settings -> Variables) override the refs.
   CADDY_IMAGE: caddy:2.10.2
 
 jobs:
@@ -50,11 +56,13 @@ jobs:
       - name: Service sources (sources.env, unless overridden)
         env:
           OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_AUTH_LOGTO_REF: ${{ inputs.auth_logto_ref || vars.AUTH_LOGTO_REF }}
+          OVERRIDE_AUTH_KEYCLOAK_REF: ${{ inputs.auth_keycloak_ref || vars.AUTH_KEYCLOAK_REF }}
           OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
           OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
         run: |
           . ./sources.env
-          for n in AUTH KB AGENT; do
+          for n in AUTH AUTH_LOGTO AUTH_KEYCLOAK KB AGENT; do
               repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
               repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
               ref=${!override_var:-${!ref_var}}
@@ -68,6 +76,18 @@ jobs:
           ref: ${{ env.AUTH_REF }}
           path: .src/auth
           # If the service repos are private, add a read token as the secret AGENTICWF_TOKEN.
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AUTH_LOGTO_REPO }}
+          ref: ${{ env.AUTH_LOGTO_REF }}
+          path: .src/auth-logto
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AUTH_KEYCLOAK_REPO }}
+          ref: ${{ env.AUTH_KEYCLOAK_REF }}
+          path: .src/auth-keycloak
           token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
       - uses: actions/checkout@v7
         with:
@@ -95,20 +115,22 @@ jobs:
           pip install ./.src/auth/authsvc
           python container/scripts/merge-policy.py \
               .src/kb/deploy/policy.kb.yaml .src/agent/deploy/policy.agent.yaml \
-              .src/auth/container/config/policy.yaml > policy.yaml
+              .src/auth/config/policy.yaml > policy.yaml
           python -c 'from pathlib import Path; from agenticwf.auth.authz import Policy; Policy.load(Path("policy.yaml"))'
           grep -c 'path:' policy.yaml
 
       - name: Caddy site files
         run: |
-          check() {   # check <name> <site files...>
+          check() {   # [APP_BASE=<path>] check <name> <site files...>
               local name=$1; shift
               mkdir -p "caddy-$name/Caddyfile.d"
               cp deploy/caddy/Caddyfile "caddy-$name/"
               for f in "$@"; do cp "deploy/caddy/sites/$f" "caddy-$name/Caddyfile.d/"; done
               docker run --rm -v "$PWD/caddy-$name:/etc/caddy:ro" \
+                  -e AGENTICWF_APP_BASE_PATH="${APP_BASE:-}" \
                   -e AGENTICWF_HOST=host.example.org -e AGENTICWF_ACME_EMAIL=ops@example.org \
                   -e AGENTICWF_LOGTO_HOST=auth.example.org -e AGENTICWF_LOGTO_ADMIN_HOST=auth-admin.example.org \
+                  -e AGENTICWF_KEYCLOAK_HOST=kc.example.org \
                   -e AGENTICWF_APP_HOST=app.example.org -e AGENTICWF_ADMIN_ALLOWED_CIDRS=10.0.0.0/8 \
                   "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
               echo "ok: $name"
@@ -116,6 +138,11 @@ jobs:
           check single agenticwf-single-host.caddyfile
           check single-admin agenticwf-single-host.caddyfile agenticwf-admin-console.caddyfile
           check multi agenticwf-multi-host.caddyfile
+          check keycloak-single agenticwf-keycloak-single-host.caddyfile
+          check keycloak-multi agenticwf-keycloak-multi-host.caddyfile
+          # The Keycloak files also serve the application under a path (AGENTICWF_APP_BASE_PATH).
+          APP_BASE=/app check keycloak-single-app agenticwf-keycloak-single-host.caddyfile
+          APP_BASE=/app check keycloak-multi-app agenticwf-keycloak-multi-host.caddyfile
 
   container:
     needs: check
@@ -128,11 +155,13 @@ jobs:
       - name: Service sources (sources.env, unless overridden)
         env:
           OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_AUTH_LOGTO_REF: ${{ inputs.auth_logto_ref || vars.AUTH_LOGTO_REF }}
+          OVERRIDE_AUTH_KEYCLOAK_REF: ${{ inputs.auth_keycloak_ref || vars.AUTH_KEYCLOAK_REF }}
           OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
           OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
         run: |
           . ./sources.env
-          for n in AUTH KB AGENT; do
+          for n in AUTH AUTH_LOGTO AUTH_KEYCLOAK KB AGENT; do
               repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
               repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
               ref=${!override_var:-${!ref_var}}
@@ -143,7 +172,7 @@ jobs:
       - name: Check the service refs
         if: github.ref_type == 'tag'
         run: |
-          for v in AUTH_REF KB_REF AGENT_REF; do
+          for v in AUTH_REF AUTH_LOGTO_REF AUTH_KEYCLOAK_REF KB_REF AGENT_REF; do
               [[ "${!v}" == main ]] && echo "::warning::$v is main; pin a release tag or commit in sources.env"
           done
           true
@@ -152,6 +181,18 @@ jobs:
           repository: ${{ env.AUTH_REPO }}
           ref: ${{ env.AUTH_REF }}
           path: .src/auth
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AUTH_LOGTO_REPO }}
+          ref: ${{ env.AUTH_LOGTO_REF }}
+          path: .src/auth-logto
+          token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AUTH_KEYCLOAK_REPO }}
+          ref: ${{ env.AUTH_KEYCLOAK_REF }}
+          path: .src/auth-keycloak
           token: ${{ secrets.AGENTICWF_TOKEN || github.token }}
       - uses: actions/checkout@v7
         with:
@@ -169,8 +210,8 @@ jobs:
       - name: Source commits
         id: src
         run: |
-          for s in auth kb agent; do
-              echo "$s=$(git -C .src/$s rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          for s in auth auth-logto auth-keycloak kb agent; do
+              echo "${s//-/_}=$(git -C .src/$s rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           done
 
       - uses: docker/setup-buildx-action@v4
@@ -182,6 +223,8 @@ jobs:
           file: container/Dockerfile
           build-contexts: |
             auth=.src/auth
+            auth-logto=.src/auth-logto
+            auth-keycloak=.src/auth-keycloak
             kb=.src/kb
             agent=.src/agent
           platforms: linux/amd64
@@ -190,8 +233,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (server)
-        run: scripts/smoke-container.sh agenticwf:ci server
+      - name: Smoke test (server, Logto)
+        run: scripts/smoke-container.sh agenticwf:ci server logto
+
+      # The same image with the other identity provider (AGENTICWF_AUTH_PROVIDER=keycloak).
+      - name: Smoke test (server, Keycloak)
+        run: scripts/smoke-container.sh agenticwf:ci server keycloak
 
       # The same image in the personal mode (AGENTICWF_MODE=local).
       - name: "Smoke test (local: kb, agent, agent + kb)"
@@ -218,12 +265,17 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
             org.agenticwf.auth-ref=${{ env.AUTH_REF }}
             org.agenticwf.auth-commit=${{ steps.src.outputs.auth }}
+            org.agenticwf.auth-logto-ref=${{ env.AUTH_LOGTO_REF }}
+            org.agenticwf.auth-logto-commit=${{ steps.src.outputs.auth_logto }}
+            org.agenticwf.auth-keycloak-ref=${{ env.AUTH_KEYCLOAK_REF }}
+            org.agenticwf.auth-keycloak-commit=${{ steps.src.outputs.auth_keycloak }}
             org.agenticwf.kb-ref=${{ env.KB_REF }}
             org.agenticwf.kb-commit=${{ steps.src.outputs.kb }}
             org.agenticwf.agent-ref=${{ env.AGENT_REF }}
             org.agenticwf.agent-commit=${{ steps.src.outputs.agent }}
 
-      # arm64 (Apple silicon laptops) builds under QEMU, without Logto: local mode only.
+      # arm64 (Apple silicon laptops) builds under QEMU, without Logto: local mode, or server mode
+      # with Keycloak.
       - if: github.ref_type == 'tag'
         uses: docker/setup-qemu-action@v4
         with:
@@ -238,6 +290,8 @@ jobs:
           file: container/Dockerfile
           build-contexts: |
             auth=.src/auth
+            auth-logto=.src/auth-logto
+            auth-keycloak=.src/auth-keycloak
             kb=.src/kb
             agent=.src/agent
           platforms: linux/amd64,linux/arm64
@@ -255,11 +309,13 @@ jobs:
       - name: Service sources (sources.env, unless overridden)
         env:
           OVERRIDE_AUTH_REF: ${{ inputs.auth_ref || vars.AUTH_REF }}
+          OVERRIDE_AUTH_LOGTO_REF: ${{ inputs.auth_logto_ref || vars.AUTH_LOGTO_REF }}
+          OVERRIDE_AUTH_KEYCLOAK_REF: ${{ inputs.auth_keycloak_ref || vars.AUTH_KEYCLOAK_REF }}
           OVERRIDE_KB_REF: ${{ inputs.kb_ref || vars.KB_REF }}
           OVERRIDE_AGENT_REF: ${{ inputs.agent_ref || vars.AGENT_REF }}
         run: |
           . ./sources.env
-          for n in AUTH KB AGENT; do
+          for n in AUTH AUTH_LOGTO AUTH_KEYCLOAK KB AGENT; do
               repo_var=${n}_REPO ref_var=${n}_REF override_var=OVERRIDE_${n}_REF
               repo=${!repo_var#https://github.com/}; repo=${repo%.git}   # owner/name for actions/checkout
               ref=${!override_var:-${!ref_var}}

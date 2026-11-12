@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Acceptance test of a built all-in-one image.
 #
-#   scripts/smoke-container.sh [image] [server|local]     default: agenticwf:latest server
+#   scripts/smoke-container.sh [image] [server|local] [logto|keycloak]
+#                                       default: agenticwf:latest server logto
 #
-# server: every service starts with `--network host`, and the wiring between them works (Logto
-#         configured from the env, a real token through authsvc to the agent, the shared
-#         AuthContext secret, the KB's service socket for the agent, the merged policy).
+# server: every service starts with `--network host`, and the wiring between them works (the
+#         shared AuthContext secret, the KB's service socket for the agent, the merged policy).
+#         logto: Logto configured from the env, a real token through authsvc to the agent.
+#         keycloak (AGENTICWF_AUTH_PROVIDER=keycloak): the AgenticWF realm imported, with the
+#         client secrets authsvc uses; Logto does not run.
 # local:  AGENTICWF_MODE=local with published ports, for "kb", "agent" and "agent kb": the access
 #         tokens, no auth programs, and the agent's link to the KB.
 # Wherever the KB runs, a keyword-only KB indexes a document and finds it by BM25 (ParadeDB
@@ -17,11 +20,13 @@ set -euo pipefail
 
 IMAGE=${1:-agenticwf:latest}
 SUITE=${2:-server}
+PROVIDER=${3:-logto}
 DOCKER=${DOCKER:-docker}
 NAME=agenticwf-smoke-$$
 VOLUME=$NAME-data
 # `--network host` as in production; ports offset so they do not clash with a running deployment.
 P_PG=15432 P_LOGTO=13001 P_LOGTO_ADMIN=13002 P_AUTHSVC=18010 P_AGENT=18000 P_KB=18020
+P_KC=18080 P_KC_MGMT=19000
 
 cleanup() { $DOCKER rm -f "$NAME" >/dev/null 2>&1 || true; $DOCKER volume rm -f "$VOLUME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -29,6 +34,16 @@ fail() { echo "FAIL: $*" >&2; $DOCKER logs "$NAME" 2>&1 | tail -80 >&2 || true; 
 status() { curl -s -o /dev/null -w '%{http_code}' -H 'Accept: application/json' "$@"; }
 
 start() {
+    if [[ $PROVIDER == keycloak ]]; then
+        $DOCKER run -d --name "$NAME" --network host \
+            -e AGENTICWF_AUTH_PROVIDER=keycloak \
+            -e KEYCLOAK_URL=http://localhost:$P_KC/idp \
+            -e APP_ORIGIN=http://localhost:18443 \
+            -e PGPORT=$P_PG -e KEYCLOAK_PORT=$P_KC -e KEYCLOAK_MANAGEMENT_PORT=$P_KC_MGMT \
+            -e AUTHSVC_PORT=$P_AUTHSVC -e AGENT_PORT=$P_AGENT -e KB_PORT=$P_KB \
+            -v "$VOLUME:/var/lib/agenticwf" "$IMAGE" >/dev/null
+        return
+    fi
     $DOCKER run -d --name "$NAME" --network host \
         -e LOGTO_ENDPOINT=http://localhost:$P_LOGTO \
         -e LOGTO_ADMIN_ENDPOINT=http://localhost:$P_LOGTO_ADMIN \
@@ -40,8 +55,9 @@ start() {
         -v "$VOLUME:/var/lib/agenticwf" "$IMAGE" >/dev/null
 }
 
-# The image's own HEALTHCHECK covers PostgreSQL, Logto, authsvc, the KB and the agent. Logto seeds
-# its database on first boot, which takes a few minutes.
+# The image's own HEALTHCHECK covers PostgreSQL, Logto or Keycloak, authsvc, the KB and the agent.
+# Logto seeds its database on first boot, Keycloak creates its schema and imports the realm: a few
+# minutes.
 wait_healthy() {
     local state
     for _ in $(seq 1 120); do
@@ -69,11 +85,18 @@ EOF
 }
 
 check_endpoints() {
-    curl -fsS -o /dev/null "http://127.0.0.1:$P_LOGTO/oidc/.well-known/openid-configuration" || fail "Logto OIDC discovery"
+    if [[ $PROVIDER == keycloak ]]; then
+        curl -fsS "http://127.0.0.1:$P_KC/idp/realms/agenticwf/.well-known/openid-configuration" \
+            | grep -q "\"issuer\":\"http://localhost:$P_KC/idp/realms/agenticwf\"" || fail "Keycloak OIDC discovery (realm agenticwf)"
+        curl -fsS -o /dev/null "http://127.0.0.1:$P_LOGTO/oidc/.well-known/openid-configuration" 2>/dev/null \
+            && fail "Logto answers with AGENTICWF_AUTH_PROVIDER=keycloak"
+    else
+        curl -fsS -o /dev/null "http://127.0.0.1:$P_LOGTO/oidc/.well-known/openid-configuration" || fail "Logto OIDC discovery"
+    fi
     curl -fsS -o /dev/null "http://127.0.0.1:$P_AUTHSVC/healthz" || fail "authsvc /healthz"
     curl -fsS -o /dev/null "http://127.0.0.1:$P_AGENT/healthz" || fail "agent /healthz"
     curl -fsS -o /dev/null "http://127.0.0.1:$P_KB/kb/health" || fail "KB /kb/health"
-    echo "   ok: Logto, authsvc, agent and KB answer"
+    echo "   ok: ${PROVIDER^}, authsvc, agent and KB answer"
 }
 
 check_policy() {
@@ -270,6 +293,21 @@ check_m2m_token() {
     echo "   ok: Logto token -> authsvc /verify -> agent (machine app $id)"
 }
 
+check_keycloak_realm() {
+    local id secret
+    # The realm the entrypoint rendered and Keycloak imported, with the Admin API client secret
+    # authsvc uses (groups, personal access tokens): a client_credentials token for it.
+    $DOCKER exec "$NAME" grep -qx 'AGENTICWF_CLIENT_ID=agenticwf-cli' /var/lib/agenticwf/keycloak/clients.env \
+        || fail "keycloak/clients.env"
+    id=agenticwf-authsvc
+    secret=$($DOCKER exec "$NAME" cat /var/lib/agenticwf/secrets/auth_mgmt_client_secret)
+    curl -fsS -u "$id:$secret" -d grant_type=client_credentials \
+        "http://127.0.0.1:$P_KC/idp/realms/agenticwf/protocol/openid-connect/token" | grep -q '"access_token"' \
+        || fail "client_credentials token for $id (realm import / client secret)"
+    curl -fsS "http://127.0.0.1:$P_AUTHSVC/auth/config" | grep -q 'agenticwf-cli' || fail "authsvc /auth/config (Keycloak)"
+    echo "   ok: Keycloak realm agenticwf with authsvc's clients"
+}
+
 programs() {   # supervisorctl status, group prefixes dropped (auth:logto -> logto, groups.ini)
     local out
     # The healthcheck passes as soon as the services answer, which can be before supervisord's
@@ -290,8 +328,15 @@ check_no_fatal() {
     if grep -E 'FATAL|BACKOFF|EXITED' <<<"$out" | grep -v '^logto-bootstrap '; then
         fail "supervisord programs not running"
     fi
-    $DOCKER exec "$NAME" test -e /run/agenticwf/logto-bootstrap.done || fail "logto-bootstrap did not succeed"
-    for p in postgres logto authsvc kb kb-service agent; do
+    if [[ $PROVIDER == keycloak ]]; then
+        for p in logto logto-bootstrap; do
+            grep -Eq "^$p +RUNNING" <<<"$out" && fail "$p runs with AGENTICWF_AUTH_PROVIDER=keycloak"
+        done
+    else
+        $DOCKER exec "$NAME" test -e /run/agenticwf/logto-bootstrap.done || fail "logto-bootstrap did not succeed"
+        grep -Eq "^keycloak +RUNNING" <<<"$out" && fail "keycloak runs with AGENTICWF_AUTH_PROVIDER=logto"
+    fi
+    for p in postgres "$PROVIDER" authsvc kb kb-service agent; do
         grep -Eq "^$p +RUNNING" <<<"$out" || fail "supervisord program $p is not RUNNING: $out"
     done
     echo "   ok: supervisord programs running"
@@ -312,7 +357,7 @@ check_local_programs() {   # check_local_programs <services>
     local out p
     out=$(programs)
     grep -E 'FATAL|BACKOFF|EXITED' <<<"$out" && fail "supervisord programs failing"
-    for p in logto logto-bootstrap authsvc; do
+    for p in logto logto-bootstrap keycloak authsvc; do
         grep -Eq "^$p +RUNNING" <<<"$out" && fail "$p runs in local mode"
     done
     for p in postgres $1; do
@@ -323,7 +368,7 @@ check_local_programs() {   # check_local_programs <services>
     else
         grep -Eq "^kb-service +RUNNING" <<<"$out" && fail "kb-service runs without the agent"
     fi
-    echo "   ok: programs for '$1' only (no Logto, authsvc)"
+    echo "   ok: programs for '$1' only (no Logto, Keycloak, authsvc)"
 }
 
 check_local_kb() {
@@ -393,8 +438,18 @@ run_local() {   # run_local <services>
     cleanup
 }
 
+check_provider() {
+    if [[ $PROVIDER == keycloak ]]; then
+        check_keycloak_realm
+    else
+        check_email_connector
+        check_logto_bootstrap
+        check_m2m_token
+    fi
+}
+
 run_server() {
-    echo "== first boot ($IMAGE)"
+    echo "== first boot ($IMAGE, $PROVIDER)"
     start
     wait_healthy
     check_endpoints
@@ -403,9 +458,7 @@ run_server() {
     check_signed_context
     check_kb_socket
     check_kb_search agent "principal:$(kb_principal)"
-    check_email_connector
-    check_logto_bootstrap
-    check_m2m_token
+    check_provider
 
     echo "== restart on the same volume"
     $DOCKER restart "$NAME" >/dev/null
@@ -414,14 +467,16 @@ run_server() {
     check_no_fatal
     check_signed_context
     check_kb_search agent "principal:$(kb_principal)" "$KB_ID"
-    check_email_connector
-    check_logto_bootstrap
-    check_m2m_token
+    check_provider
 }
 
+case "$PROVIDER" in
+    logto|keycloak) ;;
+    *) echo "provider must be logto or keycloak, not '$PROVIDER'" >&2; exit 2 ;;
+esac
 case "$SUITE" in
     server) run_server ;;
     local) run_local kb; run_local agent; run_local "agent kb" ;;
     *) echo "suite must be server or local, not '$SUITE'" >&2; exit 2 ;;
 esac
-echo "PASS ($SUITE)"
+if [[ $SUITE == server ]]; then echo "PASS ($SUITE, $PROVIDER)"; else echo "PASS ($SUITE)"; fi

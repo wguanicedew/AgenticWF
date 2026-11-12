@@ -10,12 +10,16 @@
 #       | sudo tee /etc/agenticwf/$f > /dev/null; done
 #   docker compose up -d
 #
-# AUTH_SRC / KB_SRC / AGENT_SRC (environment or a local .env file) build other checkouts instead.
+# AUTH_SRC / AUTH_LOGTO_SRC / AUTH_KEYCLOAK_SRC / KB_SRC / AGENT_SRC (environment or a local .env
+# file) build other checkouts instead.
+#
+# The identity provider: AGENTICWF_AUTH_PROVIDER=logto (default) or keycloak in agenticwf.env, with
+# the matching Caddy site file (README.md, Identity provider).
 #
 # Host networking: the services listen on 127.0.0.1 only (LISTEN_HOST), where host Caddy reaches
 # them, and Logto sends mail through the host's MTA on 127.0.0.1:25. Ports: 3001 Logto, 3002 Logto
-# admin, 8010 authsvc, 8000 agent, 8020 KB, and PostgreSQL on PGPORT (5432); they must be free on
-# the host.
+# admin (or 8080 Keycloak, 9000 its health), 8010 authsvc, 8000 agent, 8020 KB, and PostgreSQL on
+# PGPORT (5432); they must be free on the host.
 services:
   agenticwf:
     image: agenticwf:latest
@@ -27,6 +31,8 @@ services:
       network: host
       additional_contexts:
         auth: ${AUTH_SRC:-.src/auth}
+        auth-logto: ${AUTH_LOGTO_SRC:-.src/auth-logto}
+        auth-keycloak: ${AUTH_KEYCLOAK_SRC:-.src/auth-keycloak}
         kb: ${KB_SRC:-.src/kb}
         agent: ${AGENT_SRC:-.src/agent}
     network_mode: host
@@ -50,5 +56,30 @@ services:
           create_host_path: false
     restart: unless-stopped
 
+  # Optional: a cross-encoder reranker for the KB (BAAI/bge-reranker-v2-m3 on Hugging Face
+  # text-embeddings-inference), on 127.0.0.1:8081. Off unless asked for:
+  #   docker compose --profile reranker up -d
+  # then in /etc/agenticwf/kb.cfg uncomment [models.rerank.bge-reranker], set
+  # [models] default_rerank = bge-reranker, and `docker compose up -d --force-recreate agenticwf`.
+  # TEI_IMAGE picks the build: cpu-<version> (default; ~0.5-2 s per search on a few cores),
+  # <version> for Ampere GPUs (A100, A10, RTX 30xx), 89-<version> (L4, L40, RTX 40xx),
+  # hopper-<version> (H100), turing-<version> (T4); a GPU build also needs the `deploy` block below.
+  reranker:
+    profiles: [reranker]
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.7}
+    network_mode: host
+    command: ["--model-id", "BAAI/bge-reranker-v2-m3", "--hostname", "127.0.0.1", "--port", "8081",
+              "--max-client-batch-size", "256"]
+    environment:
+      HF_HUB_OFFLINE: ${TEI_OFFLINE:-0}     # 1 once the model is in the volume (no download at start)
+    volumes:
+      - reranker-models:/data              # the model (~2.3 GB), downloaded on first start
+    restart: unless-stopped
+    # deploy:                              # a GPU build: the NVIDIA container toolkit on the host
+    #   resources:
+    #     reservations:
+    #       devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
 volumes:
   agenticwf-data:
+  reranker-models:
