@@ -67,9 +67,11 @@ kc_list() { kc get "$@" --format csv --noquotes 2>/dev/null; }
 
 pw_file="$DATA_ROOT/secrets/keycloak_admin_password"
 [[ -r $pw_file ]] || stop "$pw_file not readable"
-"$kcadm" config credentials --config "$cfg" --server "$server" --realm master \
-    --user "${KEYCLOAK_ADMIN_USER:-admin}" --password "$(cat "$pw_file")" >/dev/null 2>&1 \
-    || stop "cannot sign in to the master realm as ${KEYCLOAK_ADMIN_USER:-admin} (admin replaced or password changed?); make these settings in the admin console"
+login() {
+    "$kcadm" config credentials --config "$cfg" --server "$server" --realm master \
+        --user "${KEYCLOAK_ADMIN_USER:-admin}" --password "$(cat "$pw_file")" >/dev/null 2>&1
+}
+login || stop "cannot sign in to the master realm as ${KEYCLOAK_ADMIN_USER:-admin} (admin replaced or password changed?); make these settings in the admin console"
 
 # --- 1. master realm Frontend URL ---------------------------------------------------------------
 want=${KEYCLOAK_ADMIN_URL:-}
@@ -79,6 +81,9 @@ if current=$(kc get realms/master --fields attributes 2>/dev/null \
     if [[ ${current%/} != "$want" ]]; then
         if kc update realms/master -s "attributes.frontendUrl=$want" >/dev/null; then
             log "master realm Frontend URL: ${current:-(default)} -> ${want:-(default, KEYCLOAK_URL)}"
+            # The master realm's tokens now carry the new URL as issuer: the session's token (issued
+            # under the old one) is refused from here on, so sign in again.
+            login || stop "cannot sign in again after changing the master realm's Frontend URL"
         else
             warn "cannot update the master realm's Frontend URL"
         fi
@@ -87,7 +92,9 @@ else
     warn "cannot read the master realm"
 fi
 
-kc get "realms/$realm" --fields realm >/dev/null 2>&1 || stop "realm $realm not found"
+if ! err=$(kc get "realms/$realm" --fields realm 2>&1 >/dev/null); then
+    stop "cannot read realm $realm: ${err:-unknown error}"
+fi
 
 # --- 2. Sign-up: User registration, Verify email, Forgot password ------------------------------
 # realm_flag VAR FIELD LABEL: realm boolean FIELD = $VAR, when VAR is set.

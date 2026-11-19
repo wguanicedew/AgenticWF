@@ -13,4 +13,12 @@
 # README.md (Caddy on the host). Validate with that environment loaded:
 #   sudo bash -c 'set -a; . /etc/caddy/agenticwf.env; caddy validate --config /etc/caddy/Caddyfile'
 
+# Global options (must come first). The site files serve HTTPS on 443 only; without this, Caddy also
+# opens :80 for automatic HTTP->HTTPS redirects and fails to start when another service holds port 80
+# ("listening on :80: bind: address already in use"). ACME still works over the TLS-ALPN challenge
+# on 443. Remove `disable_redirects` if port 80 is free and you want http:// to redirect.
+{
+	auto_https disable_redirects
+}
+
 import Caddyfile.d/*.caddyfile

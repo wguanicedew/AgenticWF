@@ -35,6 +35,6 @@ handle @agenticwf_jaeger_ui {
 		request_header -Cookie
 		request_header -Authorization
 		rewrite * {http.request.orig_uri}
-		reverse_proxy 127.0.0.1:16686
+		reverse_proxy 127.0.0.1:{$AGENTICWF_JAEGER_UI_PORT:16686}
 	}
 }

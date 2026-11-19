@@ -1,0 +1,55 @@
+# oauth2-proxy for deploy/caddy/sites/agenticwf-keycloak-single-host-oidc.caddyfile: the OIDC
+# client (CILogon) that Caddy asks via forward_auth. Same provider and scopes as pandaserver02's
+# mod_auth_openidc (auth_openidc.conf).
+#
+# Install:
+#   sudo install -d -m 0750 /etc/oauth2-proxy
+#   sudo install -m 0640 deploy/oauth2-proxy/agenticwf-oauth2-proxy.cfg.example /etc/oauth2-proxy/agenticwf.cfg
+#   sudo install -m 0600 deploy/oauth2-proxy/agenticwf-oauth2-proxy.env.example /etc/oauth2-proxy/agenticwf.env
+#   sudo cp deploy/oauth2-proxy/oauth2-proxy-agenticwf.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now oauth2-proxy-agenticwf
+# Secrets (client id/secret, cookie secret) are in the env file, not here.
+
+# --- Provider: CILogon, tenant bnlsdcc ---------------------------------------------------------
+provider = "oidc"
+provider_display_name = "CILogon"
+# The issuer from the discovery document pandaserver02 uses
+# (OIDCProviderMetadataURL https://cilogon.org/bnlsdcc/.well-known/openid-configuration); check:
+#   curl -s https://cilogon.org/bnlsdcc/.well-known/openid-configuration | jq -r .issuer
+oidc_issuer_url = "https://cilogon.org/bnlsdcc"
+scope = "openid email profile org.cilogon.userinfo"
+# Must be registered as a redirect URI of the CILogon client (pandaserver02's is
+# https://pandaserver02.sdcc.bnl.gov/redirect_uri, so add this one or register a new client).
+redirect_url = "https://idds01.sdcc.bnl.gov/oauth2/callback"
+
+# Who may pass. Any account CILogon/bnlsdcc authenticates (like pandaserver02), or narrow it:
+email_domains = ["*"]
+# oidc_email_claim = "email"
+# Users without an email claim (some IdPs) are refused unless:
+# insecure_oidc_allow_unverified_email = true
+# Group membership from CILogon's isMemberOf (org.cilogon.userinfo scope):
+# oidc_groups_claim = "isMemberOf"
+# allowed_groups = ["<a group name as it appears in isMemberOf>"]
+
+# --- Behind Caddy ------------------------------------------------------------------------------
+http_address = "127.0.0.1:4180"
+reverse_proxy = true
+# forward_auth only: oauth2-proxy answers /oauth2/auth with 202/401 and proxies nothing.
+upstreams = ["static://202"]
+skip_provider_button = true
+# Where /oauth2/start?rd=... may send the browser back to.
+whitelist_domains = ["idds01.sdcc.bnl.gov"]
+
+# --- Session cookie ----------------------------------------------------------------------------
+# Distinct from authsvc's cookies. Large sessions are split into _agenticwf_oidc_0, _1, ...
+cookie_name = "_agenticwf_oidc"
+cookie_secure = true
+cookie_httponly = true
+cookie_samesite = "lax"
+cookie_expire = "12h"
+# No refresh: CILogon only hands out refresh tokens with offline_access.
+cookie_refresh = "0"
+
+# --- Logging -----------------------------------------------------------------------------------
+request_logging = false
+auth_logging = true

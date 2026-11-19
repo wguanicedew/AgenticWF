@@ -14,7 +14,9 @@
 #
 # The container listens on (published on) 127.0.0.1:
 #   3001 Logto   3002 Logto admin   8010 authsvc   8000 agent   8020 KB
-# If you change LOGTO_PORT, AUTHSVC_PORT, AGENT_PORT or KB_PORT, change them here too.
+# If you change LOGTO_PORT, AUTHSVC_PORT, AGENT_PORT or KB_PORT in the container, set the same in
+# Caddy's environment as AGENTICWF_LOGTO_PORT, AGENTICWF_AUTHSVC_PORT, AGENTICWF_AGENT_PORT,
+# AGENTICWF_KB_PORT (the defaults are the ports above).
 #
 # Logto OSS cannot run under a path prefix (it mounts its routes and a catch-all sign-in
 # app at "/"), so it owns the root and the application lives under /app. Caddy strips
@@ -87,7 +89,7 @@
 			route {
 				request_header -X-Auth-*
 				import agenticwf_trace
-				reverse_proxy 127.0.0.1:8010
+				reverse_proxy 127.0.0.1:{$AGENTICWF_AUTHSVC_PORT:8010}
 			}
 		}
 
@@ -100,7 +102,7 @@
 
 				# 2. Pre-check. X-Forwarded-Uri carries the path with /app already
 				#    stripped, which is what the policy and the backends use.
-				forward_auth 127.0.0.1:8010 {
+				forward_auth 127.0.0.1:{$AGENTICWF_AUTHSVC_PORT:8010} {
 					uri /verify
 					header_up X-Forwarded-Upgrade {http.request.header.Upgrade}
 					header_up -Upgrade
@@ -112,10 +114,10 @@
 				#    (the KB checks it, AUTH_BIND_REQUEST=true).
 				@kb path /kb /kb/*
 				handle @kb {
-					reverse_proxy 127.0.0.1:8020
+					reverse_proxy 127.0.0.1:{$AGENTICWF_KB_PORT:8020}
 				}
 				handle {
-					reverse_proxy 127.0.0.1:8000
+					reverse_proxy 127.0.0.1:{$AGENTICWF_AGENT_PORT:8000}
 				}
 			}
 		}
@@ -124,6 +126,6 @@
 	# Everything else belongs to Logto (OIDC, sign-in UI, social callbacks, account center).
 	handle {
 		request_header -X-Auth-*
-		reverse_proxy 127.0.0.1:3001
+		reverse_proxy 127.0.0.1:{$AGENTICWF_LOGTO_PORT:3001}
 	}
 }

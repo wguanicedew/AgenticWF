@@ -35,13 +35,13 @@ handle @agenticwf_jaeger_ui {
 		# respond @outside "Forbidden" 403
 
 		# Sign-in (302 to Logto for page loads, 401 for the UI's API calls) and the `admin` check.
-		forward_auth 127.0.0.1:8010 {
+		forward_auth 127.0.0.1:{$AGENTICWF_AUTHSVC_PORT:8010} {
 			uri /verify
 		}
 
 		request_header -Cookie
 		request_header -Authorization
 		rewrite * {http.request.orig_uri}
-		reverse_proxy 127.0.0.1:16686
+		reverse_proxy 127.0.0.1:{$AGENTICWF_JAEGER_UI_PORT:16686}
 	}
 }

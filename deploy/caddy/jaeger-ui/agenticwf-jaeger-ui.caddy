@@ -30,5 +30,5 @@ handle @agenticwf_jaeger_ui {
 	respond @outside "Forbidden" 403
 
 	request_header -X-Auth-*
-	reverse_proxy 127.0.0.1:16686
+	reverse_proxy 127.0.0.1:{$AGENTICWF_JAEGER_UI_PORT:16686}
 }

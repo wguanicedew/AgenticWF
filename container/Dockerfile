@@ -157,8 +157,11 @@ RUN install -d /etc/agenticwf \
 # (kb.cfg: deep, the knowledge bases only; the agent's own web search fills gaps); each user may
 # choose otherwise on the agent's admin page. The
 # agent's long-term memory is the KB's temporal memory (group `agent`; off again with KB_MEMORY=false).
-COPY --from=kb container/config/kb.cfg /etc/agenticwf/kb.cfg
-COPY --from=agent container/config/agent.cfg /etc/agenticwf/agent.cfg
+# MODEL_SITE picks the model set: cern (CERN AI gateway, the default) or bnl (BNL BRAIN), from
+# the repos' kb.cfg.<site> and agent.cfg.<site> (--build-arg MODEL_SITE=bnl).
+ARG MODEL_SITE=cern
+COPY --from=kb container/config/kb.cfg.${MODEL_SITE} /etc/agenticwf/kb.cfg
+COPY --from=agent container/config/agent.cfg.${MODEL_SITE} /etc/agenticwf/agent.cfg
 COPY --from=agent src/agenticwf/agent/runtime/defaults/ /etc/agenticwf/agent/
 RUN mkdir -p /etc/agenticwf/agent/tools \
  && sed -i \
@@ -243,7 +246,10 @@ RUN set -eux; \
     tar -xzf "${tarball}" -C /opt; \
     mv "/opt/keycloak-${KEYCLOAK_VERSION}" /opt/keycloak; \
     rm -f "${tarball}"; \
-    /opt/keycloak/bin/kc.sh build --db=postgres --health-enabled=true --http-relative-path="${KEYCLOAK_PATH}"; \
+    # --cache=local: one node, no JGroups cluster (which would bind 7800/57800 on every host
+    # interface under host networking).
+    /opt/keycloak/bin/kc.sh build --db=postgres --health-enabled=true --cache=local \
+        --http-relative-path="${KEYCLOAK_PATH}"; \
     install -d -o keycloak -g keycloak /opt/keycloak/data; \
     ln -s /var/lib/agenticwf/keycloak/import /opt/keycloak/data/import; \
     echo "${KEYCLOAK_VERSION}" > /opt/keycloak/.agenticwf-version

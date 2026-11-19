@@ -37,5 +37,5 @@
 	respond @outside "Forbidden" 403
 
 	request_header -X-Auth-*
-	reverse_proxy 127.0.0.1:3002
+	reverse_proxy 127.0.0.1:{$AGENTICWF_LOGTO_ADMIN_PORT:3002}
 }

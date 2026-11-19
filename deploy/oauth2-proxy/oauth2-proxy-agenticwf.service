@@ -1,0 +1,28 @@
+# /etc/systemd/system/oauth2-proxy-agenticwf.service
+# oauth2-proxy for Caddy's OIDC gate (deploy/caddy/sites/agenticwf-keycloak-single-host-oidc.caddyfile).
+# Binary: the release tarball from https://github.com/oauth2-proxy/oauth2-proxy/releases
+#   (e.g. v7.6.0, oauth2-proxy-v7.6.0.linux-amd64.tar.gz) -> /usr/local/bin/oauth2-proxy
+# Or run the container instead of the binary, on the host network:
+#   podman run -d --name oauth2-proxy --network host \
+#     -v /etc/oauth2-proxy/agenticwf.cfg:/etc/oauth2-proxy.cfg:ro,Z \
+#     --env-file /etc/oauth2-proxy/agenticwf.env \
+#     quay.io/oauth2-proxy/oauth2-proxy:v7.6.0 --config=/etc/oauth2-proxy.cfg
+
+[Unit]
+Description=oauth2-proxy (CILogon OIDC gate for AgenticWF's Caddy)
+After=network-online.target
+Wants=network-online.target
+Before=caddy.service
+
+[Service]
+DynamicUser=yes
+EnvironmentFile=/etc/oauth2-proxy/agenticwf.env
+ExecStart=/usr/local/bin/oauth2-proxy --config=/etc/oauth2-proxy/agenticwf.cfg
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

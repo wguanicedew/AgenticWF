@@ -1,0 +1,176 @@
+# AgenticWF with Keycloak, ONE hostname, port 443, plus an outer OIDC gate (CILogon) in front of
+# every browser page: the Caddy counterpart of mod_auth_openidc on pandaserver02. Caddy has no
+# OIDC module of its own (EL9's package has no plugins), so oauth2-proxy does the OIDC part and
+# Caddy asks it about every request with `forward_auth`, the same way it asks authsvc.
+#
+# This is a variant of agenticwf-keycloak-single-host.caddyfile; install it INSTEAD of that one:
+#   sudo cp deploy/caddy/sites/agenticwf-keycloak-single-host-oidc.caddyfile /etc/caddy/Caddyfile.d/
+#   oauth2-proxy on 127.0.0.1:4180: deploy/oauth2-proxy/ (config, env file, systemd unit)
+#
+# Request flow for a browser:
+#   1. no `_agenticwf_oidc` cookie        -> 302 /oauth2/start -> CILogon -> /oauth2/callback
+#   2. CILogon session OK                 -> the request goes on as in the plain Keycloak layout:
+#      authsvc /verify, Keycloak sign-in (/idp), then the agent / KB.
+# The gate only decides WHO MAY REACH the site; who you are inside AgenticWF is still the Keycloak
+# account (authsvc does not read the CILogon identity), like pandaserver02's main location where
+# Apache enforces OIDC and Django still has its own users.
+#
+# Not gated (the equivalents of pandaserver02's OIDCUnAuthAction pass locations):
+#   /oauth2/*                       oauth2-proxy itself (start, callback, sign_out)
+#   Authorization: Bearer ...       CLI / MCP / API clients; authsvc still validates the token
+#   /idp/realms/<r>/.well-known/*   and Keycloak's machine endpoints (token, certs, userinfo,
+#   /idp/realms/<r>/protocol/openid-connect/{token,certs,userinfo,revoke,token/introspect,auth/device}
+#                                   (the CLI's device flow and authsvc's own token calls). Keycloak's
+#                                   browser pages (sign-in, sign-up, account console, the device
+#                                   verification page) ARE gated, so nobody can register a Keycloak
+#                                   account without passing CILogon first.
+#   /robots.txt
+#
+# Caddy environment (agenticwf-caddy.env.example), the same as the Keycloak single-host layout:
+#   AGENTICWF_HOST=idds01.sdcc.bnl.gov
+#   AGENTICWF_ACME_EMAIL=ops@example.org      (unused with a host certificate, see `tls` below)
+#   AGENTICWF_ADMIN_ALLOWED_CIDRS="130.199.0.0/16"
+#   AGENTICWF_APP_BASE_PATH=                  optional, e.g. /app
+#   Backend ports, optional (defaults shown); the same as the container's KEYCLOAK_PORT, AUTHSVC_PORT,
+#   AGENT_PORT, KB_PORT, and oauth2-proxy's http_address:
+#   AGENTICWF_KEYCLOAK_PORT=8080 AGENTICWF_AUTHSVC_PORT=8010 AGENTICWF_AGENT_PORT=8000
+#   AGENTICWF_KB_PORT=8020 AGENTICWF_OAUTH2_PROXY_PORT=4180
+# Container env: as for agenticwf-keycloak-single-host.caddyfile
+#   (KEYCLOAK_URL=https://<AGENTICWF_HOST>/idp, APP_ORIGIN=https://<AGENTICWF_HOST>).
+#
+# Validate:
+#   sudo bash -c 'set -a; . /etc/caddy/agenticwf.env; caddy validate --config /etc/caddy/Caddyfile'
+
+(agenticwf_common) {
+	# Hosts not reachable from the internet on 443 (likely for idds01) cannot use ACME's TLS-ALPN
+	# challenge: use the host certificate instead (readable by the `caddy` user).
+	tls {$AGENTICWF_ACME_EMAIL}
+	# tls /etc/caddy/certs/hostcert.pem /etc/caddy/certs/hostkey.pem
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+(agenticwf_trace) {
+	request_header -traceparent
+	request_header -tracestate
+	request_header -baggage
+	import /etc/caddy/tracing.d/*.caddy
+}
+
+# The application's routes, below its base path (unchanged from the Keycloak single-host layout).
+(agenticwf_app) {
+	handle /auth/* {
+		route {
+			request_header -X-Auth-*
+			import agenticwf_trace
+			reverse_proxy 127.0.0.1:{$AGENTICWF_AUTHSVC_PORT:8010}
+		}
+	}
+
+	handle {
+		route {
+			request_header -X-Auth-*
+			import agenticwf_trace
+
+			forward_auth 127.0.0.1:{$AGENTICWF_AUTHSVC_PORT:8010} {
+				uri /verify
+				header_up X-Forwarded-Upgrade {http.request.header.Upgrade}
+				header_up -Upgrade
+				header_up -Connection
+				copy_headers X-Auth-User-Id X-Auth-Client-Id X-Auth-Org-Id X-Auth-Roles X-Auth-Scopes X-Auth-Method X-Auth-Context X-Auth-Context-Sig
+			}
+
+			@kb path /kb /kb/*
+			handle @kb {
+				reverse_proxy 127.0.0.1:{$AGENTICWF_KB_PORT:8020}
+			}
+			handle {
+				reverse_proxy 127.0.0.1:{$AGENTICWF_AGENT_PORT:8000}
+			}
+		}
+	}
+}
+
+{$AGENTICWF_HOST} {
+	import agenticwf_common
+
+	# Requests that must pass WITHOUT a CILogon session (see the header).
+	@oidc_gate {
+		not path /oauth2/* /robots.txt
+		not path_regexp ^/idp/realms/[^/]+/(\.well-known/.*|protocol/openid-connect/(token|certs|userinfo|revoke|token/introspect|auth/device))$
+		not header Authorization "Bearer *"
+	}
+
+	@app_no_slash `"{$AGENTICWF_APP_BASE_PATH}" != "" && {path} == "{$AGENTICWF_APP_BASE_PATH}"`
+	@app_bare_host `"{$AGENTICWF_APP_BASE_PATH}" != "" && {path} == "/"`
+
+	# `route` runs everything in exactly this order: oauth2-proxy's own endpoints, the gate, then
+	# the plain Keycloak layout.
+	route {
+		# oauth2-proxy: /oauth2/start, /oauth2/callback (registered at CILogon), /oauth2/sign_out.
+		handle /oauth2/* {
+			request_header -X-Auth-*
+			reverse_proxy 127.0.0.1:{$AGENTICWF_OAUTH2_PROXY_PORT:4180} {
+				header_up X-Real-IP {remote_host}
+				header_up X-Forwarded-Uri {uri}
+			}
+		}
+
+		handle /robots.txt {
+			respond "User-agent: *
+Disallow: /
+" 200
+		}
+
+		# The gate. 202 = CILogon session OK, go on; 401 = none, send the browser to CILogon and
+		# back to the same URL afterwards. oauth2-proxy refreshes nothing (no offline_access), so
+		# the session lasts cookie_expire, then the browser goes through CILogon again.
+		forward_auth @oidc_gate 127.0.0.1:{$AGENTICWF_OAUTH2_PROXY_PORT:4180} {
+			uri /oauth2/auth
+			header_up X-Real-IP {remote_host}
+			# A plain GET even for WebSocket handshakes (the cookie is all that matters).
+			header_up -Upgrade
+			header_up -Connection
+			@oidc_unauth status 401
+			handle_response @oidc_unauth {
+				redir * /oauth2/start?rd={scheme}://{host}{uri} 302
+			}
+		}
+
+		# ---- from here on: agenticwf-keycloak-single-host.caddyfile ----
+
+		handle /idp/* {
+			request_header -X-Auth-*
+			@kc_admin {
+				path /idp/admin /idp/admin/* /idp/realms/master /idp/realms/master/*
+				not remote_ip {$AGENTICWF_ADMIN_ALLOWED_CIDRS:127.0.0.1/32}
+			}
+			respond @kc_admin "Forbidden" 403
+			reverse_proxy 127.0.0.1:{$AGENTICWF_KEYCLOAK_PORT:8080}
+		}
+
+		import /etc/caddy/jaeger-ui.d/*.caddy
+
+		redir @app_no_slash {$AGENTICWF_APP_BASE_PATH}/ 308
+		redir @app_bare_host {$AGENTICWF_APP_BASE_PATH}/ 302
+		redir {$AGENTICWF_APP_BASE_PATH}/kb {$AGENTICWF_APP_BASE_PATH}/kb/ 308
+
+		handle_path {$AGENTICWF_APP_BASE_PATH}/* {
+			import /etc/caddy/jaeger-ui-app.d/*.caddy
+			import agenticwf_app
+		}
+
+		handle {
+			respond "Not Found" 404
+		}
+	}
+}

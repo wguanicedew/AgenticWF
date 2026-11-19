@@ -344,7 +344,14 @@ fi
 
 # --- 4. roles, databases, extensions (every boot) --------------------------------------------
 
-pg pg_ctl -D "$PGDATA" -o "-c listen_addresses='' -p $PGPORT" -w start >/dev/null
+# Socket only (no TCP) while setting up. The server's own log goes to a file (in /run/postgresql,
+# writable by postgres) that is shown if it does not come up: pg_ctl alone only says "Examine the
+# log output".
+if ! pg pg_ctl -D "$PGDATA" -o "-c listen_addresses='' -p $PGPORT" -l /run/postgresql/setup.log \
+        -w start >/dev/null; then
+    cat /run/postgresql/setup.log >&2 || true
+    fail "PostgreSQL did not start (its log is above; PGDATA=$PGDATA)."
+fi
 trap 'pg pg_ctl -D "$PGDATA" -m fast -w stop >/dev/null 2>&1 || true' EXIT
 psql_admin() { pg psql -v ON_ERROR_STOP=1 -q -X -h /run/postgresql "$@"; }
 
