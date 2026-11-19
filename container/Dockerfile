@@ -246,17 +246,19 @@ RUN set -eux; \
     tar -xzf "${tarball}" -C /opt; \
     mv "/opt/keycloak-${KEYCLOAK_VERSION}" /opt/keycloak; \
     rm -f "${tarball}"; \
-    # --cache=local: one node, no JGroups cluster (which would bind 7800/57800 on every host
-    # interface under host networking).
-    /opt/keycloak/bin/kc.sh build --db=postgres --health-enabled=true --cache=local \
+    /opt/keycloak/bin/kc.sh build --db=postgres --health-enabled=true \
         --http-relative-path="${KEYCLOAK_PATH}"; \
     install -d -o keycloak -g keycloak /opt/keycloak/data; \
     ln -s /var/lib/agenticwf/keycloak/import /opt/keycloak/data/import; \
     echo "${KEYCLOAK_VERSION}" > /opt/keycloak/.agenticwf-version
 
+# KC_CACHE=local: one node, no JGroups cluster (which would bind 7800/57800 on every host
+# interface under host networking). A runtime option since Keycloak 26, so kc.sh start reads it
+# from the environment rather than kc.sh build.
 ENV LOGTO_VERSION=${LOGTO_VERSION} \
     KEYCLOAK_VERSION=${KEYCLOAK_VERSION} \
-    KEYCLOAK_PATH=${KEYCLOAK_PATH}
+    KEYCLOAK_PATH=${KEYCLOAK_PATH} \
+    KC_CACHE=local
 # Server mode: run with `--network host` (services on 127.0.0.1; Logto mails through the host's MTA
 # on :25). Local mode: publish the agent and KB ports, e.g. -p 127.0.0.1:8765:8000 -p 127.0.0.1:8766:8020.
 # 3001 Logto OIDC, 3002 Logto admin, 8080 Keycloak (9000 its health), 8010 authsvc, 8000 agent, 8020 KB
